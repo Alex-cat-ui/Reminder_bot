@@ -357,6 +357,60 @@ class TestMinuteLevelRelative:
         expected = FIXED_NOW + timedelta(hours=1, minutes=30)
         assert abs((r.dt - expected).total_seconds()) < 5
 
+    def test_cherez_minutu(self):
+        r = parse_user_datetime("через минуту", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=1)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
+    def test_cherez_minutku(self):
+        r = parse_user_datetime("через минутку", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=1)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
+    def test_cherez_2_minuty(self):
+        r = parse_user_datetime("через 2 минуты", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=2)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
+    def test_cherez_2_min(self):
+        r = parse_user_datetime("через 2 мин", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=2)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
+    def test_cherez_5_minut(self):
+        r = parse_user_datetime("через 5 минут", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=5)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
+    def test_cherez_dve_minuty(self):
+        r = parse_user_datetime("через две минуты", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=2)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
+    def test_cherez_pyat_minut(self):
+        r = parse_user_datetime("через пять минут", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=5)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
+    def test_cherez_desyat_minut(self):
+        r = parse_user_datetime("через десять минут", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=10)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
+    def test_cherez_tridcat_minut(self):
+        r = parse_user_datetime("через тридцать минут", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=30)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
 
 class TestMinuteLevelAbsolute:
     def test_v_18_15_colon(self):

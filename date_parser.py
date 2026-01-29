@@ -71,9 +71,33 @@ def _normalize_text(text: str) -> str:
     return re.sub(r"(\d{1,2})\s+(\d{2})\s*$", _replace_time, t)
 
 
+WORD_TO_NUM: dict[str, int] = {
+    "одну": 1, "одна": 1, "один": 1,
+    "две": 2, "два": 2, "двух": 2,
+    "три": 3, "трёх": 3, "трех": 3,
+    "четыре": 4, "четырёх": 4, "четырех": 4,
+    "пять": 5, "пяти": 5,
+    "шесть": 6, "шести": 6,
+    "семь": 7, "семи": 7,
+    "восемь": 8, "восьми": 8,
+    "девять": 9, "девяти": 9,
+    "десять": 10, "десяти": 10,
+    "пятнадцать": 15, "пятнадцати": 15,
+    "двадцать": 20, "двадцати": 20,
+    "тридцать": 30, "тридцати": 30,
+    "сорок": 40, "сорока": 40,
+    "пятьдесят": 50, "пятидесяти": 50,
+}
+
+
 def _try_relative_delta(text: str, now: datetime, tz: ZoneInfo) -> ParseResult | None:
     """Handle: через N часов/минут/дней/недель, через 1ч 30м, через полчаса."""
     t = text.lower().strip()
+
+    # через минуту / через минутку
+    if re.match(r"через\s+минут(у|ку)$", t):
+        dt = now + timedelta(minutes=1)
+        return ParseResult(dt=dt, has_date=True, has_time=True)
 
     # через полчаса
     if re.match(r"через\s+полчаса$", t):
@@ -86,17 +110,25 @@ def _try_relative_delta(text: str, now: datetime, tz: ZoneInfo) -> ParseResult |
         return ParseResult(dt=dt, has_date=True, has_time=True)
 
     # через 1ч 30м / через 1ч30м
-    m = re.match(r"через\s+(\d+)\s*ч(?:ас(?:а|ов)?)?\s*(\d+)\s*м(?:ин(?:ут[ыу]?)?)?$", t)
+    m = re.match(r"через\s+(\d+)\s*ч(?:ас(?:а|ов)?)?\s*(\d+)\s*м(?:ин(?:ут[ауы]?)?)?$", t)
     if m:
         hours, mins = int(m.group(1)), int(m.group(2))
         dt = now + timedelta(hours=hours, minutes=mins)
         return ParseResult(dt=dt, has_date=True, has_time=True)
 
-    # через N минут / через N мин
-    m = re.match(r"через\s+(\d+)\s*мин(?:ут[ыу]?)?\.?$", t)
+    # через N минут / через N мин / через N минуту / через N минуты
+    m = re.match(r"через\s+(\d+)\s*мин(?:ут[ауы]?)?\.?$", t)
     if m:
         dt = now + timedelta(minutes=int(m.group(1)))
         return ParseResult(dt=dt, has_date=True, has_time=True)
+
+    # через <слово> минут (две минуты, пять минут)
+    m = re.match(r"через\s+(\S+)\s+мин(?:ут[ауы]?)?\.?$", t)
+    if m:
+        word = m.group(1)
+        if word in WORD_TO_NUM:
+            dt = now + timedelta(minutes=WORD_TO_NUM[word])
+            return ParseResult(dt=dt, has_date=True, has_time=True)
 
     # через N часов / через N час / через N ч
     m = re.match(r"через\s+(\d+)\s*(?:час(?:а|ов)?|ч)$", t)
