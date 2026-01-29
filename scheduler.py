@@ -84,7 +84,10 @@ def _reminder_text(job_type: str, event: dict) -> str:
         prefix = "Напоминание"
 
     lines = [f"{prefix}"]
-    lines.append(f"Когда: {event['event_dt']}")
+    # Format date as DD.MM.YYYY HH:MM
+    event_dt = datetime.fromisoformat(event['event_dt'])
+    dt_formatted = event_dt.strftime("%d.%m.%Y %H:%M")
+    lines.append(f"Когда: {dt_formatted}")
     lines.append(f"Активность: {event['activity']}")
     if event.get("notes"):
         lines.append(f"Заметки:\n{event['notes']}")
@@ -153,17 +156,17 @@ async def schedule_event_jobs(event_id: int, event_dt: datetime, user_id: int, n
         logger.info("Scheduled %s for event %d at %s (job %s)", job_type, event_id, run_dt, job_id)
 
 
-async def schedule_snooze(event_id: int) -> bool:
-    """Schedule a snooze (+1 hour from now). Returns False if limit reached."""
+async def schedule_snooze(event_id: int) -> datetime | None:
+    """Schedule a snooze (+1 hour from now). Returns new reminder time or None if limit reached."""
     event = await database.get_event(event_id, path=_db_path)
     if not event or event["status"] != "active":
-        return False
+        return None
     if event["snooze_count"] >= 25:
-        return False
+        return None
 
     new_count = await database.increment_snooze(event_id, path=_db_path)
     if new_count > 25:
-        return False
+        return None
 
     user = await database.get_user(event["user_id"], path=_db_path)
     tz = ZoneInfo(user["timezone"]) if user else ZoneInfo("Europe/Moscow")
@@ -186,7 +189,7 @@ async def schedule_snooze(event_id: int) -> bool:
         path=_db_path,
     )
     logger.info("Snoozed event %d (count=%d), next at %s", event_id, new_count, run_dt)
-    return True
+    return run_dt
 
 
 async def cancel_event_jobs(event_id: int) -> None:

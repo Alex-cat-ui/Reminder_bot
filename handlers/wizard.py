@@ -96,7 +96,10 @@ async def process_date(message: Message, state: FSMContext) -> None:
 
     # Both date and time present
     if result.dt <= now:
-        await message.answer("Дата в прошлом. Введите будущую дату/время.")
+        if result.dt.date() < now.date():
+            await message.answer("Введи корректную дату")
+        else:
+            await message.answer("Введи корректное время")
         return
 
     await state.update_data(event_dt=result.dt.isoformat())
@@ -121,7 +124,7 @@ async def process_time_only(message: Message, state: FSMContext) -> None:
     dt = partial_date.replace(hour=parsed_time[0], minute=parsed_time[1], second=0, microsecond=0)
 
     if dt <= now:
-        await message.answer("Дата в прошлом. Введите будущее время.")
+        await message.answer("Введи корректное время")
         return
 
     await state.update_data(event_dt=dt.isoformat())
@@ -144,7 +147,7 @@ async def process_date_only(message: Message, state: FSMContext) -> None:
     dt = result.dt.replace(hour=data["partial_time_h"], minute=data["partial_time_m"], second=0, microsecond=0)
 
     if dt <= now:
-        await message.answer("Дата в прошлом. Введите будущую дату.")
+        await message.answer("Введи корректную дату")
         return
 
     await state.update_data(event_dt=dt.isoformat())

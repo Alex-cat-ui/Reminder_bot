@@ -4,7 +4,7 @@ import pytest
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from scheduler import compute_job_times
+from scheduler import compute_job_times, _reminder_text
 
 TZ = ZoneInfo("Europe/Moscow")
 
@@ -84,3 +84,26 @@ class TestSnoozeLimit:
         assert MAX_SNOOZE == 25
         assert 25 >= MAX_SNOOZE
         assert 24 < MAX_SNOOZE
+
+
+class TestReminderText:
+    def test_date_format_dd_mm_yyyy_hh_mm(self):
+        """Date in reminder text should be formatted as DD.MM.YYYY HH:MM."""
+        event = {
+            "event_dt": "2025-06-12T18:30:00+03:00",
+            "activity": "Test activity",
+            "notes": None,
+        }
+        text = _reminder_text("at_time", event)
+        assert "12.06.2025 18:30" in text
+
+    def test_date_format_soon(self):
+        """Date format should be correct for 'soon' job type."""
+        event = {
+            "event_dt": "2025-12-25T09:15:00+03:00",
+            "activity": "Christmas",
+            "notes": None,
+        }
+        text = _reminder_text("soon", event)
+        assert "25.12.2025 09:15" in text
+        assert "событие скоро" in text

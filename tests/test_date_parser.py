@@ -333,6 +333,30 @@ class TestMinuteLevelRelative:
         expected = FIXED_NOW + timedelta(hours=2, minutes=5)
         assert abs((r.dt - expected).total_seconds()) < 5
 
+    def test_cherez_40_minut(self):
+        r = parse_user_datetime("через 40 минут", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=40)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
+    def test_cherez_40_min(self):
+        r = parse_user_datetime("через 40 мин", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=40)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
+    def test_cherez_polchasa(self):
+        r = parse_user_datetime("через полчаса", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(minutes=30)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
+    def test_cherez_poltora_chasa(self):
+        r = parse_user_datetime("через полтора часа", TZ)
+        assert r is not None
+        expected = FIXED_NOW + timedelta(hours=1, minutes=30)
+        assert abs((r.dt - expected).total_seconds()) < 5
+
 
 class TestMinuteLevelAbsolute:
     def test_v_18_15_colon(self):

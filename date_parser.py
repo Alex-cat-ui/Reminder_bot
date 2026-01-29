@@ -72,8 +72,18 @@ def _normalize_text(text: str) -> str:
 
 
 def _try_relative_delta(text: str, now: datetime, tz: ZoneInfo) -> ParseResult | None:
-    """Handle: через N часов/минут/дней/недель, через 1ч 30м."""
+    """Handle: через N часов/минут/дней/недель, через 1ч 30м, через полчаса."""
     t = text.lower().strip()
+
+    # через полчаса
+    if re.match(r"через\s+полчаса$", t):
+        dt = now + timedelta(minutes=30)
+        return ParseResult(dt=dt, has_date=True, has_time=True)
+
+    # через полтора часа
+    if re.match(r"через\s+полтора\s+часа$", t):
+        dt = now + timedelta(hours=1, minutes=30)
+        return ParseResult(dt=dt, has_date=True, has_time=True)
 
     # через 1ч 30м / через 1ч30м
     m = re.match(r"через\s+(\d+)\s*ч(?:ас(?:а|ов)?)?\s*(\d+)\s*м(?:ин(?:ут[ыу]?)?)?$", t)
@@ -82,14 +92,14 @@ def _try_relative_delta(text: str, now: datetime, tz: ZoneInfo) -> ParseResult |
         dt = now + timedelta(hours=hours, minutes=mins)
         return ParseResult(dt=dt, has_date=True, has_time=True)
 
-    # через N минут
-    m = re.match(r"через\s+(\d+)\s*мин(?:ут[ыу]?)?$", t)
+    # через N минут / через N мин
+    m = re.match(r"через\s+(\d+)\s*мин(?:ут[ыу]?)?\.?$", t)
     if m:
         dt = now + timedelta(minutes=int(m.group(1)))
         return ParseResult(dt=dt, has_date=True, has_time=True)
 
-    # через N часов
-    m = re.match(r"через\s+(\d+)\s*час(?:а|ов)?$", t)
+    # через N часов / через N час / через N ч
+    m = re.match(r"через\s+(\d+)\s*(?:час(?:а|ов)?|ч)$", t)
     if m:
         dt = now + timedelta(hours=int(m.group(1)))
         return ParseResult(dt=dt, has_date=True, has_time=True)

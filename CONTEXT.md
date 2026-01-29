@@ -1,6 +1,6 @@
 # Reminder Bot — Project Context
 
-**Version 1.0** | Updated: 2026-01-29
+**Version 1.01** | Updated: 2026-01-29
 
 ## What this project is
 Telegram reminder bot written in Python (aiogram).
@@ -67,11 +67,20 @@ reminder_bot/
 - **events**: id, user_id, event_dt, activity, notes, status, snooze_count
 - **jobs**: id, event_id, job_type, run_dt, scheduler_job_id
 
-## Current state (v1.0)
+## Current state (v1.01)
 - All core features implemented and working
-- 92 tests passing
+- 98 tests passing
 - Bot is production-ready for basic usage
 - Jobs persist and restore on restart
+
+## Changelog
+
+### v1.01 (2026-01-29)
+- Fixed date format in reminders: now shows "DD.MM.YYYY HH:MM"
+- Improved past date validation: separate messages for date/time errors
+- Added parsing for "через полчаса", "через полтора часа"
+- Improved "через N мин" / "через N минут" parsing
+- Fixed snooze button: now shows new reminder time in message
 
 ## How to run
 - Set TELEGRAM_BOT_TOKEN in env or .env
