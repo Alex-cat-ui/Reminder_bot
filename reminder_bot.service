@@ -1,0 +1,17 @@
+[Unit]
+Description=Telegram Reminder Bot
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/projects/reminder_bot
+EnvironmentFile=/root/projects/reminder_bot/.env
+ExecStart=/root/projects/reminder_bot/.venv/bin/python3 main.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
