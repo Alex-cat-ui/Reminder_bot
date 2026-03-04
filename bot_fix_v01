@@ -1,0 +1,524 @@
+BOT FIX V01
+
+Document type: Engineering implementation roadmap (reorganized)
+Version: 2.0
+Date: 2026-03-04
+Project: reminder_bot
+
+0. How to use this document
+1. This document is execution order source of truth.
+2. Work is executed strictly phase by phase.
+3. Next phase starts only after previous phase exit criteria are met.
+4. If any phase fails exit criteria, implementation returns to that phase.
+
+1. Required information before starting any phase
+1.1 Environment and infrastructure data (mandatory)
+1. TELEGRAM_BOT_TOKEN for target environment.
+2. REDIS_DSN for FSM storage phase (Phase 6), including credentials.
+3. ADMIN_USER_IDS list for /metrics_today access (Phase 7).
+4. Database path and backup policy for bot.db.
+5. Deployment environment timezone policy (UTC for ops, user timezone for UX).
+
+1.2 Access and operations data (mandatory)
+1. Access to production/staging host where bot runs.
+2. Access to logs (stdout + file log).
+3. Access to service restart mechanism (systemd/service manager).
+4. Access to run full test suite (`pytest -q`).
+
+1.3 Product rules fixed for all phases (mandatory)
+1. No LLM usage.
+2. No destructive deletion of events data; status-based soft delete remains.
+3. Calendar date range is dynamic: today .. today+730 days.
+4. Quick time buttons are HH:MM only.
+5. "Today green" is implemented with marker symbol, not style color.
+6. Undo delete window is 15 minutes.
+7. Duplicate signature = same user_id + same event_dt + normalized activity.
+8. Browser page size is fixed at 5.
+
+1.4 Technical constraints fixed for all phases (mandatory)
+1. Python 3.11+, aiogram 3.x.
+2. Scheduler behavior (job computation semantics) is unchanged unless explicitly stated.
+3. Any callback with event_id must pass ownership validation before mutation.
+4. All mutating operations must return explicit confirmation text.
+
+1.5 Pre-phase readiness checklist (must be completed)
+1. Current branch is synchronized and testable.
+2. Existing tests pass (`pytest -q`) before new changes.
+3. Database backup is taken before schema extension phases.
+4. Team agrees with rollout order in section 3.
+
+2. Phase index and dependency order
+1. Phase 1: Calendar foundation for create flow.
+2. Phase 2: Edit already saved tasks.
+3. Phase 3: Security and UX consistency baseline.
+4. Phase 4: Task browser (filters + pagination).
+5. Phase 5: Task operation UX (undo delete + clone + duplicate guard).
+6. Phase 6: FSM persistence on Redis.
+7. Phase 7: Analytics counters and admin metrics endpoint.
+
+Dependency rules
+1. Phase 1 -> Phase 2.
+2. Phase 2 -> Phase 3.
+3. Phase 3 -> Phase 4 and Phase 5.
+4. Phase 4 -> Phase 5.
+5. Phase 3 -> Phase 6.
+6. Phase 3 and Phase 5 -> Phase 7.
+
+3. Rollout strategy
+1. Implement and merge phase by phase in exact order from section 2.
+2. After each phase: run tests + manual smoke for that phase.
+3. Deploy phase to staging first, then production.
+4. Keep rollback instructions per phase available during rollout.
+
+3.1 Final button UX contract (mandatory, no alternatives)
+1. Main menu reply keyboard (always after /start and after any completed/cancelled flow):
+2. Row 1: ["Напомнить", "Мои активности на неделю"].
+3. Create flow step "select date":
+4. Reply keyboard: ["Отмена"].
+5. Inline calendar keyboard rows:
+6. Row 1 navigation: ["<", "<month> <year>", ">"].
+7. Row 2 quick dates: ["Сегодня", "Завтра", "+7 дней"].
+8. Row 3 weekdays: ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"].
+9. Rows 4-9 calendar days: 6 rows × 7 buttons.
+10. Row 10: ["Отмена"].
+11. Create/edit time step:
+12. Inline quick time row: ["09:00", "12:00", "18:00", "20:00"].
+13. Inline row: ["Ввести вручную"].
+14. Wizard confirmation reply keyboard:
+15. Row 1: ["Подтвердить"].
+16. Row 2: ["Изменить"].
+17. Row 3: ["Отмена"].
+18. Task browser keyboard:
+19. Row 1 filters: ["Сегодня", "Завтра", "Неделя", "Все"].
+20. Row 2 pagination: ["←", "<page>/<total_pages>", "→"].
+21. For each visible item (max 5 per page), one row:
+22. ["Изменить #n", "Повторить #n", "Удалить #n"].
+23. Final row: ["Закрыть"].
+24. Reminder action keyboard (message sent by scheduler):
+25. Row 1: ["Отложить на 1 час", "Завершить"] when snooze_count < 25.
+26. Row 1: ["Завершить"] when snooze_count >= 25.
+27. Delete-undo keyboard:
+28. Row 1: ["Отменить удаление"].
+29. Timezone selection keyboard:
+30. Popular timezone rows (one per row) + final row ["Отмена"].
+31. Pressing timezone cancel returns MAIN_MENU and clears timezone FSM state.
+
+====================
+PHASE 1
+Calendar foundation (create flow)
+====================
+
+4. Phase 1 goal
+1. Replace manual date entry in create flow with inline calendar.
+2. Keep manual time input and add quick time HH:MM buttons.
+3. Ensure month navigation edits one message (no chat spam).
+
+5. Phase 1 implementation scope
+1. Add shared calendar core module: `handlers/calendar_core.py`.
+2. Use callback protocol `cal2:` with session id.
+3. Add quick date buttons: Сегодня / Завтра / +7 дней.
+4. Add quick time buttons: 09:00 / 12:00 / 18:00 / 20:00 / Ввести вручную.
+5. Add debounce 350ms for callback clicks per user.
+6. Mark today with green marker symbol (`🟢DD`).
+7. Show timezone in date/time step messages.
+8. Enforce single-message calendar navigation algorithm.
+
+6. Phase 1 required inputs from section 1
+1. Product rules 1.3 fully approved.
+2. Baseline tests pass before changes.
+
+7. Phase 1 file changes
+1. `handlers/wizard.py`.
+2. `handlers/calendar_core.py` (new).
+3. `handlers/__init__.py` unchanged in Phase 1.
+4. `tests/test_calendar_core.py` (new).
+5. `tests/test_calendar_range.py` (new).
+
+8. Phase 1 callback protocol (strict)
+1. `cal2:<sid>:noop`
+2. `cal2:<sid>:cancel`
+3. `cal2:<sid>:nav:prev:YYYY:MM`
+4. `cal2:<sid>:nav:next:YYYY:MM`
+5. `cal2:<sid>:day:YYYYMMDD`
+6. `cal2:<sid>:quick:today`
+7. `cal2:<sid>:quick:tomorrow`
+8. `cal2:<sid>:quick:plus7`
+9. `cal2:<sid>:time:0900`
+10. `cal2:<sid>:time:1200`
+11. `cal2:<sid>:time:1800`
+12. `cal2:<sid>:time:2000`
+13. `cal2:<sid>:time:manual`
+
+9. Phase 1 acceptance criteria
+1. Calendar month switches edit existing message_id only.
+2. Quick date and quick time buttons are functional.
+3. Today is marked with green marker symbol.
+4. Stale session callbacks are rejected.
+5. Date range is dynamic and non-hardcoded by year list.
+
+10. Phase 1 tests
+1. Session id format and stale validation.
+2. Month navigation across year boundaries.
+3. Same message_id reuse on navigation.
+4. Debounce behavior.
+5. Min/max date range and leap day handling.
+
+11. Phase 1 rollback
+1. Revert `handlers/calendar_core.py` and wizard integration.
+2. Restore previous date/time input flow.
+3. Run `pytest -q`.
+
+====================
+PHASE 2
+Edit already saved tasks
+====================
+
+12. Phase 2 goal
+1. Allow editing one specific saved task selected from list.
+2. Support field-level edit: date/time, activity, notes.
+
+13. Phase 2 implementation scope
+1. Add "Изменить" button near each task card.
+2. Introduce edit FSM (`EditEventStates`).
+3. Add edit callback protocol `evt:` and edit calendar protocol `edtcal2:`.
+4. Reuse shared calendar core from Phase 1.
+5. On datetime change: update DB + cancel old jobs + schedule new jobs.
+6. On activity/notes change: update DB only.
+
+14. Phase 2 required inputs from section 1
+1. Phase 1 completed and accepted.
+2. Ownership rule approved for all edit callbacks.
+
+15. Phase 2 file changes
+1. `handlers/weekly.py`.
+2. `handlers/event_edit.py` (new).
+3. `handlers/__init__.py`.
+4. `db.py` (new update/read helpers).
+5. `tests/test_event_edit_flow.py` (new).
+6. `tests/test_event_edit_helpers.py` (new).
+
+16. Phase 2 callback protocols (strict)
+`evt:`
+1. `evt:edit:<event_id>`
+2. `evt:field:dt:<event_id>`
+3. `evt:field:activity:<event_id>`
+4. `evt:field:notes:<event_id>`
+5. `evt:cancel:<event_id>`
+
+`edtcal2:`
+1. `edtcal2:<sid>:<event_id>:noop`
+2. `edtcal2:<sid>:<event_id>:cancel`
+3. `edtcal2:<sid>:<event_id>:nav:prev:YYYY:MM`
+4. `edtcal2:<sid>:<event_id>:nav:next:YYYY:MM`
+5. `edtcal2:<sid>:<event_id>:day:YYYYMMDD`
+6. `edtcal2:<sid>:<event_id>:quick:today`
+7. `edtcal2:<sid>:<event_id>:quick:tomorrow`
+8. `edtcal2:<sid>:<event_id>:quick:plus7`
+9. `edtcal2:<sid>:<event_id>:time:0900`
+10. `edtcal2:<sid>:<event_id>:time:1200`
+11. `edtcal2:<sid>:<event_id>:time:1800`
+12. `edtcal2:<sid>:<event_id>:time:2000`
+13. `edtcal2:<sid>:<event_id>:time:manual`
+
+17. Phase 2 acceptance criteria
+1. User edits exactly selected event_id.
+2. Date/time edit reschedules jobs correctly.
+3. Activity/notes edits do not reschedule jobs.
+4. Unauthorized edit is rejected.
+
+18. Phase 2 tests
+1. Edit activity success/validation.
+2. Edit notes with '-' -> None.
+3. Edit datetime past-time rejection.
+4. Edit datetime rescheduling path.
+5. Wrong-owner denial.
+
+19. Phase 2 rollback
+1. Remove edit buttons and event_edit router.
+2. Revert DB helper functions used only by edit flow.
+3. Run `pytest -q`.
+
+====================
+PHASE 3
+Security and UX consistency baseline
+====================
+
+20. Phase 3 goal
+1. Make callback mutation paths ownership-safe.
+2. Unify all user texts via one catalog.
+3. Unify event preview format for create/edit/clone.
+
+21. Phase 3 implementation scope
+1. Ownership checks in `snooze/done/delete` and all edit callbacks.
+2. Add `handlers/texts.py` for all user-facing strings.
+3. Add unified preview formatter with timezone.
+4. Add explicit cancel behavior for timezone selection flow.
+
+22. Phase 3 required inputs from section 1
+1. Approved wording for all key user texts.
+2. Confirmation that show_alert is acceptable for unauthorized callbacks.
+
+23. Phase 3 file changes
+1. `handlers/callbacks.py`.
+2. `handlers/wizard.py`.
+3. `handlers/event_edit.py`.
+4. `handlers/timezone.py`.
+5. `handlers/texts.py` (new).
+6. Tests for security + text catalog + preview + timezone cancel.
+
+24. Phase 3 acceptance criteria
+1. No callback mutation without ownership pass.
+2. All texts sourced from `handlers/texts.py`.
+3. Preview always includes absolute datetime and timezone.
+4. Existing scheduler action callbacks (`snooze/done/delete`) are ownership-protected.
+5. Timezone flow has explicit "Отмена" and safe return to MAIN_MENU.
+
+25. Phase 3 tests
+1. Wrong user cannot snooze/done/delete another user's event.
+2. Required text constants exist.
+3. Preview format is consistent.
+4. Timezone cancel returns to MAIN_MENU and clears FSM state.
+
+26. Phase 3 rollback
+1. Rollback of text catalog and preview formatting is allowed.
+2. Rollback of ownership checks is forbidden.
+3. Any request to rollback ownership checks is treated as security exception and blocked.
+
+====================
+PHASE 4
+Task browser (filters + pagination)
+====================
+
+27. Phase 4 goal
+1. Replace weekly multi-message dump with one interactive browser message.
+2. Provide filters and pagination.
+
+28. Phase 4 implementation scope
+1. New `handlers/task_browser.py`.
+2. Filter tabs: Сегодня / Завтра / Неделя / Все.
+3. Pagination with page size 5.
+4. Single-message edits for filter/page navigation.
+5. Browser callback protocol `br2:`.
+
+29. Phase 4 required inputs from section 1
+1. Confirm filter semantics in user timezone.
+2. Confirm page size fixed at 5.
+
+30. Phase 4 file changes
+1. `handlers/task_browser.py` (new).
+2. `handlers/weekly.py` becomes compatibility entry that delegates to task browser with default filter `week`.
+3. `db.py` (count/list by filter functions).
+4. `handlers/__init__.py` router order.
+
+31. Phase 4 callback protocol (strict)
+1. `br2:<sid>:f:<filter>:p:<page>`.
+2. `<filter>` values: `today|tomorrow|week|all`.
+3. Browser close: `br2:<sid>:close`.
+4. Browser item actions:
+5. `br2:<sid>:edit:<event_id>`
+6. `br2:<sid>:clone:<event_id>`
+7. `br2:<sid>:delete:<event_id>`
+8. Any browser callback with sid mismatch is rejected as stale.
+9. `br2:<sid>:close` behavior is fixed:
+10. edit current browser message text to "Список закрыт.".
+11. remove inline keyboard from browser message.
+12. do not send additional browser messages.
+
+32. Phase 4 acceptance criteria
+1. Filter/page change edits same message.
+2. Correct item windows per timezone filter.
+3. Pagination bounds are clamped safely.
+4. Browser close removes inline keyboard and does not leave dead controls.
+
+33. Phase 4 tests
+1. Filter bounds tests.
+2. Pagination math tests.
+3. Same-message navigation test.
+
+34. Phase 4 rollback
+1. Restore old weekly per-message rendering.
+2. Disable browser router.
+
+====================
+PHASE 5
+Task operation UX (undo delete + clone + duplicate guard)
+====================
+
+35. Phase 5 goal
+1. Add safe undo for deletion.
+2. Add fast clone flow.
+3. Add duplicate warning before save.
+
+36. Phase 5 implementation scope
+1. Extend DB schema with `undo_actions` table.
+2. Add `undo2:<token>` callbacks and 15-minute validity.
+3. Clone action callback is `br2:<sid>:clone:<event_id>` (from browser item row).
+4. Add duplicate guard in create/edit-datetime/clone save operations.
+5. Add duplicate confirmation callbacks `dup2:<sid>:save|cancel`.
+
+37. Phase 5 required inputs from section 1
+1. Confirm undo window = 15 minutes.
+2. Confirm duplicate signature and override text.
+
+38. Phase 5 file changes
+1. `db.py` schema + helpers.
+2. `handlers/callbacks.py` keeps reminder-message callbacks only (`snooze/done/delete`).
+3. `handlers/task_browser.py` owns browser delete/undo/clone callbacks and UI updates.
+4. `handlers/wizard.py` and `handlers/event_edit.py` (duplicate guard integration).
+5. Tests for undo/clone/duplicate.
+
+39. Phase 5 acceptance criteria
+1. Deleted task can be restored within 15 minutes.
+2. Expired undo token is rejected.
+3. Clone creates a new event with copied activity/notes and new date/time.
+4. Duplicate warning blocks save until explicit confirmation.
+
+40. Phase 5 tests
+1. Undo success, undo expiry, wrong-user undo reject.
+2. Clone success and job scheduling.
+3. Duplicate detection in create/clone/edit datetime.
+
+41. Phase 5 rollback
+1. Disable undo/clone callbacks.
+2. Keep DB table but stop usage.
+3. Re-enable simple delete flow.
+4. Browser delete callback falls back to direct soft delete without undo.
+
+====================
+PHASE 6
+FSM persistence on Redis
+====================
+
+42. Phase 6 goal
+1. Preserve wizard/edit state across bot restarts.
+
+43. Phase 6 implementation scope
+1. Add Redis dependency.
+2. Replace MemoryStorage with RedisStorage.
+3. Add startup Redis ping and fail-fast behavior.
+4. Add FSM TTL config.
+
+44. Phase 6 required inputs from section 1
+1. Valid REDIS_DSN.
+2. Redis availability SLO and restart policy.
+
+45. Phase 6 file changes
+1. `requirements.txt`.
+2. `config.py`.
+3. `main.py`.
+4. Tests for startup/storage behavior.
+
+46. Phase 6 acceptance criteria
+1. FSM survives bot restart.
+2. Startup fails when Redis unavailable.
+3. No fallback to MemoryStorage.
+
+47. Phase 6 tests
+1. Redis storage selection test.
+2. Startup fail-fast test (mocked Redis failure).
+
+48. Phase 6 rollback
+1. Emergency-only rollback path to MemoryStorage.
+2. Must be documented in incident log if used.
+
+====================
+PHASE 7
+Analytics counters and admin metrics
+====================
+
+49. Phase 7 goal
+1. Persist daily counters for key UX/safety signals.
+2. Provide admin command to inspect current day metrics.
+
+50. Phase 7 implementation scope
+1. Add `metrics_daily` table.
+2. Add `increment_metric(...)` helper.
+3. Instrument mandatory events.
+4. Add `/metrics_today` command with admin allowlist.
+
+51. Phase 7 required inputs from section 1
+1. ADMIN_USER_IDS list.
+2. Agreed list of metric keys.
+
+52. Phase 7 file changes
+1. `db.py` schema + metrics helpers.
+2. `handlers/metrics.py` (new, mandatory) for `/metrics_today`.
+3. `config.py` for admin list parsing.
+4. Instrumentation points in handlers.
+
+53. Phase 7 mandatory metric keys
+1. ownership_reject
+2. callback_invalid_payload
+3. callback_stale_session
+4. callback_debounce_reject
+5. time_parse_error
+6. time_past_reject
+7. duplicate_warning_shown
+8. duplicate_override_save
+9. undo_success
+10. undo_expired
+11. clone_created
+12. delete_performed
+13. create_success
+14. edit_success
+
+54. Phase 7 acceptance criteria
+1. Metrics survive restart in SQLite.
+2. Admin receives `/metrics_today` report.
+3. Non-admin access is denied.
+
+55. Phase 7 tests
+1. Increment create/increment existing row.
+2. Admin/non-admin command behavior.
+
+56. Phase 7 rollback
+1. Disable metrics command and instrumentation.
+2. Keep table intact.
+
+====================
+GLOBAL CONTROL
+====================
+
+57. Global router order (final target)
+1. `start.router`
+2. `timezone.router`
+3. `wizard.router`
+4. `task_browser.router`
+5. `event_edit.router`
+6. `weekly.router` (compatibility wrapper, mandatory)
+7. `callbacks.router`
+8. `metrics.router` (fixed position: after callbacks.router)
+
+58. Global non-functional requirements
+1. No synchronous blocking I/O in handlers.
+2. Callback p95 processing target < 300ms (excluding Telegram network latency).
+3. DB operations use transactions for multi-step mutations.
+
+59. Global migration policy
+1. Schema evolves only via `CREATE TABLE IF NOT EXISTS` and indexes.
+2. Existing data remains backward-compatible.
+3. Backup is required before phases that alter schema (Phase 5, Phase 7).
+
+60. Global completion gate
+1. All phase acceptance criteria are satisfied.
+2. Full regression passes (`pytest -q`).
+3. Manual QA pass per phase is documented.
+4. Production rollout logs and rollback instructions are stored.
+
+61. Current code to target UX delta (audit result)
+1. Main menu currently already matches target buttons:
+2. `["Напомнить", "Мои активности на неделю"]`.
+3. Current weekly list sends one message per event and only button "Удалить"; target requires single browser message with edit/clone/delete per item.
+4. Current wizard date entry is text-only; target requires calendar-first with quick dates and same-message month navigation.
+5. Current wizard supports edit only before save; target adds edit for already saved tasks from list.
+6. Current reminder callbacks do not verify ownership; target requires ownership validation for all event-id callbacks.
+7. Current cancellation UX is consistent for wizard; target keeps this and extends cancel availability in browser/calendars.
+
+62. Button convenience rules (mandatory)
+1. Any inline keyboard used for navigation must include explicit cancel/close action.
+2. User must be able to return to main menu from any long flow in at most 2 taps.
+3. No screen may require memorizing numeric ids; all item actions are button-driven by event card.
+4. After mutating action (save/edit/delete/undo/clone), bot sends explicit confirmation text and keeps user in predictable context:
+5. create/edit flows -> MAIN_MENU.
+6. browser actions -> browser message refresh on same page/filter.
+7. close/cancel action always removes active inline controls from the current message.

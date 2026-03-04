@@ -6,6 +6,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton
 
 import db as database
+from .texts import MSG_MAIN_MENU
 
 router = Router()
 
@@ -25,4 +26,4 @@ async def cmd_start(message: Message, state: FSMContext) -> None:
         from . import timezone as tz_mod
         await tz_mod.ask_timezone(message, state)
     else:
-        await message.answer("Главное меню:", reply_markup=MAIN_MENU)
+        await message.answer(MSG_MAIN_MENU, reply_markup=MAIN_MENU)

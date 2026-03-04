@@ -1,0 +1,967 @@
+"""Interactive task browser: filters + pagination in one message."""
+
+from __future__ import annotations
+
+import math
+import re
+import secrets
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
+
+import db as database
+from scheduler import cancel_event_jobs, schedule_event_jobs
+from .calendar_core import (
+    build_date_calendar_kb,
+    build_quick_time_kb,
+    is_debounced,
+    month_shift,
+    new_calendar_session_id,
+    parse_calendar_callback_with_event,
+)
+from .duplicates import has_duplicate_event
+from .event_edit import start_edit_menu_for_event
+from .metrics_utils import bump_metric
+from .start import MAIN_MENU
+from .texts import (
+    MSG_BROWSER_CLOSED,
+    MSG_BROWSER_EMPTY,
+    MSG_CALENDAR_UPDATED,
+    MSG_CLONE_CREATED,
+    MSG_DEBOUNCE,
+    MSG_DELETED,
+    MSG_DELETED_WITH_UNDO,
+    MSG_DUPLICATE_WARNING,
+    MSG_EDIT_CANCELLED,
+    MSG_INVALID_ACTION,
+    MSG_SET_TZ_FIRST,
+    MSG_STALE_CALENDAR,
+    MSG_TIME_PARSE_ERROR,
+    MSG_TIME_PAST,
+    MSG_UNAUTHORIZED,
+    MSG_UNDO_EXPIRED,
+    MSG_UNDO_RESTORED,
+    format_event_preview,
+)
+
+router = Router()
+
+
+class BrowserStates(StatesGroup):
+    viewing = State()
+    clone_waiting_calendar_date = State()
+    clone_waiting_time = State()
+    clone_confirm = State()
+
+
+FILTER_RU = {
+    "today": "Сегодня",
+    "tomorrow": "Завтра",
+    "week": "Неделя",
+    "all": "Все",
+}
+
+PAGE_SIZE = 5
+CANCEL_KB = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Отмена")]], resize_keyboard=True)
+
+
+# ---------- Browser list ----------
+
+def _bounds_for_filter(filter_name: str, now: datetime) -> tuple[str | None, str | None]:
+    if filter_name == "all":
+        return None, None
+
+    start_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_today = now.replace(hour=23, minute=59, second=59, microsecond=0)
+
+    if filter_name == "today":
+        return start_today.isoformat(), end_today.isoformat()
+
+    if filter_name == "tomorrow":
+        start_tomorrow = start_today + timedelta(days=1)
+        end_tomorrow = end_today + timedelta(days=1)
+        return start_tomorrow.isoformat(), end_tomorrow.isoformat()
+
+    # week
+    days_until_sunday = 6 - now.weekday()
+    end_week = (start_today + timedelta(days=days_until_sunday)).replace(
+        hour=23, minute=59, second=59, microsecond=0
+    )
+    return now.isoformat(), end_week.isoformat()
+
+
+def _short_activity(text: str) -> str:
+    t = text.strip()
+    return t if len(t) <= 60 else t[:57] + "..."
+
+
+def _parse_browser_callback(data: str) -> tuple[str, dict] | None:
+    parts = data.split(":")
+    if len(parts) < 3 or parts[0] != "br2":
+        return None
+
+    sid = parts[1]
+    if len(parts) == 3 and parts[2] == "close":
+        return "close", {"sid": sid}
+
+    if len(parts) == 6 and parts[2] == "f" and parts[4] == "p":
+        filter_name = parts[3]
+        page_str = parts[5]
+        if filter_name not in FILTER_RU:
+            return None
+        if not page_str.lstrip("-").isdigit():
+            return None
+        return "page", {"sid": sid, "filter": filter_name, "page": int(page_str)}
+
+    if len(parts) == 4 and parts[2] in {"edit", "clone", "delete"} and parts[3].isdigit():
+        return parts[2], {"sid": sid, "event_id": int(parts[3])}
+
+    return None
+
+
+async def _build_browser_payload(
+    *,
+    user_id: int,
+    tz_name: str,
+    sid: str,
+    filter_name: str,
+    page: int,
+) -> tuple[str, InlineKeyboardMarkup, int, int]:
+    tz = ZoneInfo(tz_name)
+    now = datetime.now(tz)
+    start_dt, end_dt = _bounds_for_filter(filter_name, now)
+
+    total_items = await database.count_events_by_filter(
+        user_id,
+        filter_name,
+        start_dt or "",
+        end_dt or "",
+    )
+    total_pages = max(1, math.ceil(total_items / PAGE_SIZE))
+    page = max(1, min(page, total_pages))
+    offset = (page - 1) * PAGE_SIZE
+
+    events = await database.list_events_by_filter(
+        user_id,
+        filter_name,
+        start_dt,
+        end_dt,
+        PAGE_SIZE,
+        offset,
+    )
+
+    header = f"Активности: {FILTER_RU[filter_name]} | Страница {page}/{total_pages}"
+    lines = [header, ""]
+
+    if not events:
+        lines.append(MSG_BROWSER_EMPTY)
+    else:
+        for idx, ev in enumerate(events, start=offset + 1):
+            dt = datetime.fromisoformat(ev["event_dt"])
+            notes_flag = "да" if ev.get("notes") else "нет"
+            lines.append(
+                f"{idx}. {dt.strftime('%d.%m.%Y %H:%M')} ({tz_name})\n"
+                f"Активность: {_short_activity(ev['activity'])}\n"
+                f"Заметки: {notes_flag}"
+            )
+            lines.append("")
+
+    text = "\n".join(lines).strip()
+
+    kb_rows: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(text="Сегодня", callback_data=f"br2:{sid}:f:today:p:1"),
+            InlineKeyboardButton(text="Завтра", callback_data=f"br2:{sid}:f:tomorrow:p:1"),
+            InlineKeyboardButton(text="Неделя", callback_data=f"br2:{sid}:f:week:p:1"),
+            InlineKeyboardButton(text="Все", callback_data=f"br2:{sid}:f:all:p:1"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="←",
+                callback_data=f"br2:{sid}:f:{filter_name}:p:{max(1, page - 1)}",
+            ),
+            InlineKeyboardButton(
+                text=f"{page}/{total_pages}",
+                callback_data=f"br2:{sid}:f:{filter_name}:p:{page}",
+            ),
+            InlineKeyboardButton(
+                text="→",
+                callback_data=f"br2:{sid}:f:{filter_name}:p:{min(total_pages, page + 1)}",
+            ),
+        ],
+    ]
+
+    for idx, ev in enumerate(events, start=offset + 1):
+        kb_rows.append(
+            [
+                InlineKeyboardButton(text=f"Изменить #{idx}", callback_data=f"br2:{sid}:edit:{ev['id']}"),
+                InlineKeyboardButton(text=f"Повторить #{idx}", callback_data=f"br2:{sid}:clone:{ev['id']}"),
+                InlineKeyboardButton(text=f"Удалить #{idx}", callback_data=f"br2:{sid}:delete:{ev['id']}"),
+            ]
+        )
+
+    kb_rows.append([InlineKeyboardButton(text="Закрыть", callback_data=f"br2:{sid}:close")])
+
+    return text, InlineKeyboardMarkup(inline_keyboard=kb_rows), page, total_pages
+
+
+async def _refresh_browser_message(callback: CallbackQuery, state: FSMContext, *, user_id: int) -> None:
+    data = await state.get_data()
+    sid = data.get("browser_sid")
+    filter_name = data.get("browser_filter", "week")
+    page = int(data.get("browser_page", 1))
+    tz_name = data.get("browser_timezone")
+
+    if not sid or not tz_name or callback.message is None:
+        return
+
+    text, kb, page, _ = await _build_browser_payload(
+        user_id=user_id,
+        tz_name=tz_name,
+        sid=sid,
+        filter_name=filter_name,
+        page=page,
+    )
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except TelegramBadRequest:
+        return
+
+    await state.set_state(BrowserStates.viewing)
+    await state.update_data(browser_filter=filter_name, browser_page=page)
+
+
+async def start_tasks_browser(
+    message: Message,
+    state: FSMContext,
+    *,
+    default_filter: str = "week",
+) -> None:
+    user_id = message.from_user.id  # type: ignore[union-attr]
+    user = await database.get_user(user_id)
+    if not user:
+        await message.answer(MSG_SET_TZ_FIRST)
+        return
+
+    sid = new_calendar_session_id()
+    tz_name = user["timezone"]
+
+    text, kb, page, _ = await _build_browser_payload(
+        user_id=user_id,
+        tz_name=tz_name,
+        sid=sid,
+        filter_name=default_filter,
+        page=1,
+    )
+
+    await state.set_state(BrowserStates.viewing)
+    await state.update_data(
+        browser_sid=sid,
+        browser_filter=default_filter,
+        browser_page=page,
+        browser_timezone=tz_name,
+    )
+
+    sent = await message.answer(text, reply_markup=kb)
+    await state.update_data(browser_message_id=sent.message_id)
+
+
+@router.message(Command("tasks"))
+async def cmd_tasks(message: Message, state: FSMContext) -> None:
+    await start_tasks_browser(message, state, default_filter="all")
+
+
+# ---------- Browser callbacks ----------
+
+@router.callback_query(F.data.startswith("br2:"))
+async def on_browser_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    user_id = callback.from_user.id  # type: ignore[union-attr]
+    if is_debounced(user_id):
+        await bump_metric("callback_debounce_reject")
+        await callback.answer(MSG_DEBOUNCE)
+        return
+
+    parsed = _parse_browser_callback(callback.data or "")
+    if parsed is None:
+        await bump_metric("callback_invalid_payload")
+        await callback.answer(MSG_INVALID_ACTION)
+        return
+
+    kind, payload = parsed
+    data = await state.get_data()
+
+    sid = payload["sid"]
+    if data.get("browser_sid") != sid:
+        await bump_metric("callback_stale_session")
+        await callback.answer(MSG_STALE_CALENDAR)
+        return
+
+    if callback.message is None:
+        await bump_metric("callback_invalid_payload")
+        await callback.answer(MSG_INVALID_ACTION)
+        return
+
+    if kind == "close":
+        try:
+            await callback.message.edit_text(MSG_BROWSER_CLOSED, reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await state.clear()
+        await callback.answer()
+        return
+
+    tz_name = data.get("browser_timezone")
+    if not tz_name:
+        await callback.answer(MSG_SET_TZ_FIRST)
+        return
+
+    if kind == "page":
+        if callback.message.message_id != data.get("browser_message_id"):
+            await bump_metric("callback_stale_session")
+            await callback.answer(MSG_STALE_CALENDAR)
+            return
+
+        filter_name = payload["filter"]
+        requested_page = payload["page"]
+        text, kb, page, _ = await _build_browser_payload(
+            user_id=user_id,
+            tz_name=tz_name,
+            sid=sid,
+            filter_name=filter_name,
+            page=requested_page,
+        )
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except TelegramBadRequest as exc:
+            lowered = str(exc).lower()
+            if "message is not modified" in lowered:
+                await callback.answer()
+                return
+            if "message to edit not found" in lowered:
+                sent = await callback.message.answer(text, reply_markup=kb)
+                await state.update_data(browser_message_id=sent.message_id)
+                await callback.answer(MSG_CALENDAR_UPDATED)
+                return
+            await callback.answer(MSG_INVALID_ACTION)
+            return
+
+        await state.set_state(BrowserStates.viewing)
+        await state.update_data(browser_filter=filter_name, browser_page=page)
+        await callback.answer()
+        return
+
+    event_id = payload["event_id"]
+    event = await database.get_active_event_for_user(event_id, user_id)
+    if event is None:
+        await bump_metric("ownership_reject")
+        await callback.answer(MSG_UNAUTHORIZED, show_alert=True)
+        return
+
+    if kind == "edit":
+        ok, error = await start_edit_menu_for_event(
+            callback.message,
+            state,
+            user_id=user_id,
+            event_id=event_id,
+        )
+        await callback.answer()
+        if not ok and error:
+            await callback.message.answer(error)
+        return
+
+    if kind == "clone":
+        await callback.answer()
+        await _start_clone_calendar_step(
+            callback.message,
+            state,
+            user_id=user_id,
+            source_event=event,
+            tz_name=tz_name,
+        )
+        return
+
+    if kind == "delete":
+        await database.update_event_status(event_id, "deleted")
+        await cancel_event_jobs(event_id)
+        await bump_metric("delete_performed")
+
+        token = secrets.token_hex(6)
+        expires_at = (datetime.utcnow() + timedelta(minutes=15)).isoformat()
+        await database.create_undo_action(event_id, user_id, token, expires_at)
+
+        await _refresh_browser_message(callback, state, user_id=user_id)
+        await callback.answer(MSG_DELETED)
+        await callback.message.answer(
+            MSG_DELETED_WITH_UNDO,
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[InlineKeyboardButton(text="Отменить удаление", callback_data=f"undo2:{token}")]]
+            ),
+        )
+        return
+
+    await callback.answer(MSG_INVALID_ACTION)
+
+
+# ---------- Undo ----------
+
+_TOKEN_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
+@router.callback_query(F.data.startswith("undo2:"))
+async def on_undo_callback(callback: CallbackQuery) -> None:
+    token = (callback.data or "").split(":", 1)[1] if ":" in (callback.data or "") else ""
+    if _TOKEN_RE.match(token) is None:
+        await bump_metric("callback_invalid_payload")
+        await callback.answer(MSG_INVALID_ACTION, show_alert=True)
+        return
+
+    undo = await database.get_undo_action(token)
+    if not undo or undo["status"] != "active":
+        await bump_metric("undo_expired")
+        await callback.answer(MSG_UNDO_EXPIRED, show_alert=True)
+        return
+
+    user_id = callback.from_user.id  # type: ignore[union-attr]
+    if undo["user_id"] != user_id:
+        await bump_metric("ownership_reject")
+        await callback.answer(MSG_UNAUTHORIZED, show_alert=True)
+        return
+
+    expires_at = datetime.fromisoformat(undo["expires_at"])
+    now_utc = datetime.utcnow()
+    if now_utc > expires_at:
+        await database.mark_undo_action_expired(token)
+        await bump_metric("undo_expired")
+        await callback.answer(MSG_UNDO_EXPIRED, show_alert=True)
+        return
+
+    event = await database.get_event(undo["event_id"])
+    if not event or event["status"] != "deleted":
+        await bump_metric("undo_expired")
+        await callback.answer(MSG_UNDO_EXPIRED, show_alert=True)
+        return
+
+    await database.update_event_status(undo["event_id"], "active")
+    await database.mark_undo_action_used(token, now_utc.isoformat())
+
+    event_dt = datetime.fromisoformat(event["event_dt"])
+    await schedule_event_jobs(undo["event_id"], event_dt, user_id)
+    await bump_metric("undo_success")
+
+    await callback.answer(MSG_UNDO_RESTORED)
+    if callback.message:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await callback.message.answer(MSG_UNDO_RESTORED)
+
+
+# ---------- Clone flow ----------
+
+def _clone_quick_date(value: str, today: date) -> date | None:
+    if value == "today":
+        return today
+    if value == "tomorrow":
+        return today + timedelta(days=1)
+    if value == "plus7":
+        return today + timedelta(days=7)
+    return None
+
+
+def _clone_bounds(tz_name: str) -> tuple[date, date]:
+    tz = ZoneInfo(tz_name)
+    today = datetime.now(tz).date()
+    return today, today + timedelta(days=730)
+
+
+def _with_tz_line(base: str, tz_name: str) -> str:
+    return f"{base}\nЧасовой пояс: {tz_name}"
+
+
+def _clone_confirm_kb(sid: str, source_event_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Создать копию", callback_data=f"cln2:{sid}:confirm:{source_event_id}")],
+            [InlineKeyboardButton(text="Отмена", callback_data=f"cln2:{sid}:cancel_confirm:{source_event_id}")],
+        ]
+    )
+
+
+def _duplicate_warning_kb(sid: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Сохранить", callback_data=f"dup2:{sid}:save")],
+            [InlineKeyboardButton(text="Отмена", callback_data=f"dup2:{sid}:cancel")],
+        ]
+    )
+
+
+async def _start_clone_calendar_step(
+    message: Message,
+    state: FSMContext,
+    *,
+    user_id: int,
+    source_event: dict,
+    tz_name: str,
+) -> None:
+    today, max_date = _clone_bounds(tz_name)
+    sid = new_calendar_session_id()
+
+    await state.set_state(BrowserStates.clone_waiting_calendar_date)
+    await state.update_data(
+        clone_sid=sid,
+        clone_source_event_id=source_event["id"],
+        clone_timezone=tz_name,
+        clone_selected_date_iso=None,
+        clone_activity=source_event["activity"],
+        clone_notes=source_event.get("notes"),
+        clone_dup_sid=None,
+        clone_dup_override=False,
+    )
+
+    step_text = _with_tz_line("Шаг 1/2. Выберите новую дату в календаре.", tz_name)
+    await message.answer(step_text, reply_markup=CANCEL_KB)
+    kb = build_date_calendar_kb(
+        sid,
+        today.year,
+        today.month,
+        today,
+        max_date,
+        selected_date=None,
+        today_date=today,
+        prefix="cln2",
+        tail_parts=(str(source_event["id"]),),
+    )
+    sent = await message.answer(step_text, reply_markup=kb)
+    await state.update_data(clone_message_id=sent.message_id)
+
+
+async def _apply_clone_time(
+    state: FSMContext,
+    *,
+    user_id: int,
+    hour: int,
+    minute: int,
+) -> tuple[bool, str | None]:
+    data = await state.get_data()
+    selected_iso = data.get("clone_selected_date_iso")
+    tz_name = data.get("clone_timezone")
+
+    if not selected_iso or not tz_name:
+        return False, MSG_STALE_CALENDAR
+
+    selected_date = date.fromisoformat(selected_iso)
+    tz = ZoneInfo(tz_name)
+    now = datetime.now(tz)
+    dt = datetime(
+        selected_date.year,
+        selected_date.month,
+        selected_date.day,
+        hour,
+        minute,
+        tzinfo=tz,
+    )
+
+    if dt <= now:
+        await bump_metric("time_past_reject")
+        return False, MSG_TIME_PAST
+
+    await state.update_data(clone_event_dt_iso=dt.isoformat())
+    await state.set_state(BrowserStates.clone_confirm)
+    return True, None
+
+
+async def _finalize_clone(state: FSMContext, user_id: int) -> tuple[bool, str | None]:
+    data = await state.get_data()
+    dt_iso = data.get("clone_event_dt_iso")
+    activity = data.get("clone_activity")
+    notes = data.get("clone_notes")
+
+    if not dt_iso or not activity:
+        return False, MSG_INVALID_ACTION
+
+    duplicate = await has_duplicate_event(
+        user_id=user_id,
+        event_dt_iso=dt_iso,
+        activity=activity,
+    )
+    if duplicate and not data.get("clone_dup_override"):
+        dup_sid = new_calendar_session_id()
+        await state.update_data(clone_dup_sid=dup_sid)
+        return False, "DUPLICATE"
+
+    dt = datetime.fromisoformat(dt_iso)
+    event_id = await database.create_event(
+        user_id=user_id,
+        event_dt=dt_iso,
+        activity=activity,
+        notes=notes,
+    )
+    await schedule_event_jobs(event_id, dt, user_id)
+    await bump_metric("clone_created")
+    await state.clear()
+    return True, None
+
+
+@router.message(BrowserStates.clone_waiting_calendar_date, F.text == "Отмена")
+@router.message(BrowserStates.clone_waiting_time, F.text == "Отмена")
+@router.message(BrowserStates.clone_confirm, F.text == "Отмена")
+async def cancel_clone_by_text(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
+
+
+@router.callback_query(BrowserStates.clone_waiting_calendar_date, F.data.startswith("cln2:"))
+async def on_clone_calendar(callback: CallbackQuery, state: FSMContext) -> None:
+    user_id = callback.from_user.id  # type: ignore[union-attr]
+    if is_debounced(user_id):
+        await bump_metric("callback_debounce_reject")
+        await callback.answer(MSG_DEBOUNCE)
+        return
+
+    payload = parse_calendar_callback_with_event(callback.data or "", prefix="cln2")
+    if payload is None:
+        await bump_metric("callback_invalid_payload")
+        await callback.answer(MSG_INVALID_ACTION)
+        return
+
+    kind, parsed = payload
+    data = await state.get_data()
+    sid = data.get("clone_sid")
+    source_event_id = data.get("clone_source_event_id")
+    tz_name = data.get("clone_timezone")
+
+    if not sid or not source_event_id or not tz_name:
+        await bump_metric("callback_stale_session")
+        await callback.answer(MSG_STALE_CALENDAR)
+        return
+
+    if parsed["sid"] != sid or parsed["event_id"] != source_event_id:
+        await bump_metric("callback_stale_session")
+        await callback.answer(MSG_STALE_CALENDAR)
+        return
+
+    if kind == "noop":
+        await callback.answer()
+        return
+
+    if kind == "cancel":
+        await state.clear()
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
+        return
+
+    if callback.message is None:
+        await callback.answer(MSG_INVALID_ACTION)
+        return
+
+    today, max_date = _clone_bounds(tz_name)
+
+    if kind == "nav":
+        if callback.message.message_id != data.get("clone_message_id"):
+            await bump_metric("callback_stale_session")
+            await callback.answer(MSG_STALE_CALENDAR)
+            return
+
+        shift = -1 if parsed["direction"] == "prev" else 1
+        new_year, new_month = month_shift(parsed["year"], parsed["month"], shift)
+        min_month = (today.year, today.month)
+        max_month = (max_date.year, max_date.month)
+        if (new_year, new_month) < min_month:
+            new_year, new_month = min_month
+        if (new_year, new_month) > max_month:
+            new_year, new_month = max_month
+
+        selected = data.get("clone_selected_date_iso")
+        selected_date = date.fromisoformat(selected) if selected else None
+        kb = build_date_calendar_kb(
+            sid,
+            new_year,
+            new_month,
+            today,
+            max_date,
+            selected_date=selected_date,
+            today_date=today,
+            prefix="cln2",
+            tail_parts=(str(source_event_id),),
+        )
+        text = _with_tz_line("Шаг 1/2. Выберите новую дату в календаре.", tz_name)
+
+        try:
+            await callback.message.edit_text(text, reply_markup=kb)
+        except TelegramBadRequest as exc:
+            lowered = str(exc).lower()
+            if "message is not modified" in lowered:
+                await callback.answer()
+                return
+            if "message to edit not found" in lowered:
+                sent = await callback.message.answer(text, reply_markup=kb)
+                await state.update_data(clone_message_id=sent.message_id)
+                await callback.answer(MSG_CALENDAR_UPDATED)
+                return
+            await callback.answer(MSG_INVALID_ACTION)
+            return
+
+        await callback.answer()
+        return
+
+    if kind in {"day", "quick"}:
+        if kind == "day":
+            selected = parsed["date"]
+        else:
+            selected = _clone_quick_date(parsed["value"], today)
+            if selected is None:
+                await callback.answer(MSG_INVALID_ACTION)
+                return
+
+        if selected < today or selected > max_date:
+            await callback.answer(MSG_INVALID_ACTION)
+            return
+
+        await state.update_data(clone_selected_date_iso=selected.isoformat())
+        await state.set_state(BrowserStates.clone_waiting_time)
+
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+
+        await callback.answer()
+        await callback.message.answer(
+            _with_tz_line("Шаг 2/2. Введите новое время (например: 18:00, вечером).", tz_name),
+            reply_markup=build_quick_time_kb(
+                sid,
+                prefix="cln2",
+                tail_parts=(str(source_event_id),),
+            ),
+        )
+        return
+
+    await callback.answer(MSG_INVALID_ACTION)
+
+
+@router.callback_query(BrowserStates.clone_waiting_time, F.data.startswith("cln2:"))
+async def on_clone_time(callback: CallbackQuery, state: FSMContext) -> None:
+    user_id = callback.from_user.id  # type: ignore[union-attr]
+    if is_debounced(user_id):
+        await bump_metric("callback_debounce_reject")
+        await callback.answer(MSG_DEBOUNCE)
+        return
+
+    payload = parse_calendar_callback_with_event(callback.data or "", prefix="cln2")
+    if payload is None:
+        await bump_metric("callback_invalid_payload")
+        await callback.answer(MSG_INVALID_ACTION)
+        return
+
+    kind, parsed = payload
+    data = await state.get_data()
+    sid = data.get("clone_sid")
+    source_event_id = data.get("clone_source_event_id")
+
+    if not sid or not source_event_id:
+        await bump_metric("callback_stale_session")
+        await callback.answer(MSG_STALE_CALENDAR)
+        return
+
+    if parsed["sid"] != sid or parsed["event_id"] != source_event_id:
+        await bump_metric("callback_stale_session")
+        await callback.answer(MSG_STALE_CALENDAR)
+        return
+
+    if kind == "noop":
+        await callback.answer()
+        return
+
+    if kind == "cancel":
+        await state.clear()
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
+        return
+
+    if kind != "time":
+        await callback.answer(MSG_INVALID_ACTION)
+        return
+
+    if parsed["value"] == "manual":
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer("Введите новое время вручную (например: 18:00, вечером).")
+        return
+
+    hhmm = parsed["value"]
+    ok, error = await _apply_clone_time(
+        state,
+        user_id=user_id,
+        hour=int(hhmm[:2]),
+        minute=int(hhmm[2:]),
+    )
+    if not ok:
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(error or MSG_INVALID_ACTION)
+        return
+
+    data = await state.get_data()
+    dt = datetime.fromisoformat(data["clone_event_dt_iso"])
+    preview = format_event_preview(
+        dt=dt,
+        activity=data["clone_activity"],
+        notes=data.get("clone_notes"),
+        tz_name=data["clone_timezone"],
+        mode="create",
+    )
+
+    await callback.answer()
+    if callback.message:
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await callback.message.answer(preview, reply_markup=_clone_confirm_kb(sid, source_event_id))
+
+
+@router.message(BrowserStates.clone_waiting_time)
+async def clone_time_manual(message: Message, state: FSMContext) -> None:
+    text = (message.text or "").strip().lower()
+
+    from date_parser import _parse_time_str
+
+    data = await state.get_data()
+    tz_name = data.get("clone_timezone")
+    if not tz_name:
+        await message.answer(MSG_STALE_CALENDAR)
+        return
+
+    tz = ZoneInfo(tz_name)
+    parsed = _parse_time_str(text, datetime.now(tz), tz)
+    if parsed is None:
+        await bump_metric("time_parse_error")
+        await message.answer(MSG_TIME_PARSE_ERROR)
+        return
+
+    ok, error = await _apply_clone_time(
+        state,
+        user_id=message.from_user.id,  # type: ignore[union-attr]
+        hour=parsed[0],
+        minute=parsed[1],
+    )
+    if not ok:
+        await message.answer(error or MSG_INVALID_ACTION)
+        return
+
+    data = await state.get_data()
+    dt = datetime.fromisoformat(data["clone_event_dt_iso"])
+    preview = format_event_preview(
+        dt=dt,
+        activity=data["clone_activity"],
+        notes=data.get("clone_notes"),
+        tz_name=data["clone_timezone"],
+        mode="create",
+    )
+    await message.answer(preview, reply_markup=_clone_confirm_kb(data["clone_sid"], data["clone_source_event_id"]))
+
+
+def _parse_clone_confirm_callback(data: str) -> tuple[str, str, int] | None:
+    parts = data.split(":")
+    if len(parts) != 4 or parts[0] != "cln2":
+        return None
+    sid = parts[1]
+    action = parts[2]
+    if action not in {"confirm", "cancel_confirm"}:
+        return None
+    if not parts[3].isdigit():
+        return None
+    return action, sid, int(parts[3])
+
+
+@router.callback_query(BrowserStates.clone_confirm, F.data.startswith("cln2:"))
+async def on_clone_confirm(callback: CallbackQuery, state: FSMContext) -> None:
+    parsed = _parse_clone_confirm_callback(callback.data or "")
+    if parsed is None:
+        await bump_metric("callback_invalid_payload")
+        await callback.answer(MSG_INVALID_ACTION)
+        return
+
+    action, sid, source_event_id = parsed
+    data = await state.get_data()
+
+    if sid != data.get("clone_sid") or source_event_id != data.get("clone_source_event_id"):
+        await bump_metric("callback_stale_session")
+        await callback.answer(MSG_STALE_CALENDAR)
+        return
+
+    if action == "cancel_confirm":
+        await state.clear()
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
+        return
+
+    ok, error = await _finalize_clone(state, callback.from_user.id)  # type: ignore[union-attr]
+    if not ok and error == "DUPLICATE":
+        data = await state.get_data()
+        await bump_metric("duplicate_warning_shown")
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer(
+                MSG_DUPLICATE_WARNING,
+                reply_markup=_duplicate_warning_kb(data["clone_dup_sid"]),
+            )
+        return
+
+    if not ok:
+        await callback.answer(error or MSG_INVALID_ACTION)
+        return
+
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(MSG_CLONE_CREATED, reply_markup=MAIN_MENU)
+
+
+@router.callback_query(BrowserStates.clone_confirm, F.data.startswith("dup2:"))
+async def on_clone_duplicate_decision(callback: CallbackQuery, state: FSMContext) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or parts[0] != "dup2" or parts[2] not in {"save", "cancel"}:
+        await bump_metric("callback_invalid_payload")
+        await callback.answer(MSG_INVALID_ACTION)
+        return
+
+    dup_sid = parts[1]
+    data = await state.get_data()
+    expected = data.get("clone_dup_sid")
+    if not expected or expected != dup_sid:
+        await bump_metric("callback_stale_session")
+        await callback.answer(MSG_STALE_CALENDAR)
+        return
+
+    if parts[2] == "cancel":
+        await callback.answer()
+        return
+
+    await state.update_data(clone_dup_override=True)
+    ok, error = await _finalize_clone(state, callback.from_user.id)  # type: ignore[union-attr]
+    if not ok:
+        await callback.answer(error or MSG_INVALID_ACTION)
+        return
+
+    await bump_metric("duplicate_override_save")
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(MSG_CLONE_CREATED, reply_markup=MAIN_MENU)

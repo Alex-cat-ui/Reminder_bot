@@ -101,6 +101,89 @@ class TestEventCRUD:
         count = await database.increment_snooze(eid, path=db_path)
         assert count == 26  # DB allows it; scheduler checks the limit
 
+    async def test_get_active_event_for_user_owner_ok(self, db_path):
+        await database.upsert_user(111, "Europe/Moscow", path=db_path)
+        eid = await database.create_event(
+            user_id=111,
+            event_dt="2025-12-25T18:00:00+03:00",
+            activity="Owner task",
+            notes=None,
+            path=db_path,
+        )
+        event = await database.get_active_event_for_user(eid, 111, path=db_path)
+        assert event is not None
+        assert event["id"] == eid
+
+    async def test_get_active_event_for_user_wrong_owner_none(self, db_path):
+        await database.upsert_user(111, "Europe/Moscow", path=db_path)
+        await database.upsert_user(222, "Europe/Moscow", path=db_path)
+        eid = await database.create_event(
+            user_id=111,
+            event_dt="2025-12-25T18:00:00+03:00",
+            activity="Owner task",
+            notes=None,
+            path=db_path,
+        )
+        event = await database.get_active_event_for_user(eid, 222, path=db_path)
+        assert event is None
+
+    async def test_get_active_event_for_user_deleted_none(self, db_path):
+        await database.upsert_user(111, "Europe/Moscow", path=db_path)
+        eid = await database.create_event(
+            user_id=111,
+            event_dt="2025-12-25T18:00:00+03:00",
+            activity="Deleted task",
+            notes=None,
+            path=db_path,
+        )
+        await database.update_event_status(eid, "deleted", path=db_path)
+        event = await database.get_active_event_for_user(eid, 111, path=db_path)
+        assert event is None
+
+    async def test_update_event_datetime_only(self, db_path):
+        await database.upsert_user(111, "Europe/Moscow", path=db_path)
+        eid = await database.create_event(
+            user_id=111,
+            event_dt="2025-12-25T18:00:00+03:00",
+            activity="Task",
+            notes="Note",
+            path=db_path,
+        )
+        await database.update_event_datetime(eid, "2026-01-01T09:30:00+03:00", path=db_path)
+        event = await database.get_event(eid, path=db_path)
+        assert event["event_dt"] == "2026-01-01T09:30:00+03:00"
+        assert event["activity"] == "Task"
+        assert event["notes"] == "Note"
+
+    async def test_update_event_activity_only(self, db_path):
+        await database.upsert_user(111, "Europe/Moscow", path=db_path)
+        eid = await database.create_event(
+            user_id=111,
+            event_dt="2025-12-25T18:00:00+03:00",
+            activity="Old",
+            notes="Note",
+            path=db_path,
+        )
+        await database.update_event_activity(eid, "New", path=db_path)
+        event = await database.get_event(eid, path=db_path)
+        assert event["activity"] == "New"
+        assert event["event_dt"] == "2025-12-25T18:00:00+03:00"
+        assert event["notes"] == "Note"
+
+    async def test_update_event_notes_only(self, db_path):
+        await database.upsert_user(111, "Europe/Moscow", path=db_path)
+        eid = await database.create_event(
+            user_id=111,
+            event_dt="2025-12-25T18:00:00+03:00",
+            activity="Task",
+            notes="Old note",
+            path=db_path,
+        )
+        await database.update_event_notes(eid, None, path=db_path)
+        event = await database.get_event(eid, path=db_path)
+        assert event["notes"] is None
+        assert event["activity"] == "Task"
+
 
 @pytest.mark.asyncio
 class TestWeekEvents:
@@ -215,3 +298,118 @@ class TestJobsCRUD:
         await database.update_event_status(eid, "done", path=db_path)
         all_jobs = await database.get_all_jobs(path=db_path)
         assert len(all_jobs) == 0
+
+
+@pytest.mark.asyncio
+class TestUndoAndDuplicates:
+    async def test_create_and_get_undo_action(self, db_path):
+        await database.upsert_user(111, "Europe/Moscow", path=db_path)
+        event_id = await database.create_event(
+            user_id=111,
+            event_dt="2026-03-10T10:00:00+03:00",
+            activity="Workout",
+            notes=None,
+            path=db_path,
+        )
+
+        await database.create_undo_action(
+            event_id=event_id,
+            user_id=111,
+            token="abcdef123456",
+            expires_at="2026-03-10T10:15:00",
+            path=db_path,
+        )
+        undo = await database.get_undo_action("abcdef123456", path=db_path)
+        assert undo is not None
+        assert undo["event_id"] == event_id
+        assert undo["status"] == "active"
+
+    async def test_mark_undo_used(self, db_path):
+        await database.upsert_user(111, "Europe/Moscow", path=db_path)
+        event_id = await database.create_event(
+            user_id=111,
+            event_dt="2026-03-10T10:00:00+03:00",
+            activity="Workout",
+            notes=None,
+            path=db_path,
+        )
+        await database.create_undo_action(
+            event_id=event_id,
+            user_id=111,
+            token="abcdef123456",
+            expires_at="2026-03-10T10:15:00",
+            path=db_path,
+        )
+        await database.mark_undo_action_used("abcdef123456", "2026-03-10T10:05:00", path=db_path)
+        undo = await database.get_undo_action("abcdef123456", path=db_path)
+        assert undo["status"] == "used"
+        assert undo["used_at"] == "2026-03-10T10:05:00"
+
+    async def test_mark_undo_expired(self, db_path):
+        await database.upsert_user(111, "Europe/Moscow", path=db_path)
+        event_id = await database.create_event(
+            user_id=111,
+            event_dt="2026-03-10T10:00:00+03:00",
+            activity="Workout",
+            notes=None,
+            path=db_path,
+        )
+        await database.create_undo_action(
+            event_id=event_id,
+            user_id=111,
+            token="abcdef123456",
+            expires_at="2026-03-10T10:15:00",
+            path=db_path,
+        )
+        await database.mark_undo_action_expired("abcdef123456", path=db_path)
+        undo = await database.get_undo_action("abcdef123456", path=db_path)
+        assert undo["status"] == "expired"
+
+    async def test_find_duplicate_events(self, db_path):
+        await database.upsert_user(111, "Europe/Moscow", path=db_path)
+        event_dt = "2026-03-10T10:00:00+03:00"
+        first_id = await database.create_event(
+            user_id=111,
+            event_dt=event_dt,
+            activity="Workout",
+            notes=None,
+            path=db_path,
+        )
+        await database.create_event(
+            user_id=111,
+            event_dt=event_dt,
+            activity="workout",
+            notes=None,
+            path=db_path,
+        )
+
+        dupes = await database.find_duplicate_events(
+            user_id=111,
+            event_dt=event_dt,
+            activity_norm="workout",
+            path=db_path,
+        )
+        assert len(dupes) == 2
+
+        dupes_excluding_first = await database.find_duplicate_events(
+            user_id=111,
+            event_dt=event_dt,
+            activity_norm="workout",
+            exclude_event_id=first_id,
+            path=db_path,
+        )
+        assert len(dupes_excluding_first) == 1
+
+
+@pytest.mark.asyncio
+class TestMetrics:
+    async def test_increment_metric_creates_row(self, db_path):
+        await database.increment_metric("create_success", day_utc="2026-03-04", path=db_path)
+        rows = await database.get_metrics_for_day("2026-03-04", path=db_path)
+        assert rows == [{"key": "create_success", "value": 1}]
+
+    async def test_increment_metric_updates_existing_row(self, db_path):
+        await database.increment_metric("create_success", day_utc="2026-03-04", path=db_path)
+        await database.increment_metric("create_success", day_utc="2026-03-04", path=db_path)
+        rows = await database.get_metrics_for_day("2026-03-04", path=db_path)
+        assert rows == [{"key": "create_success", "value": 2}]
