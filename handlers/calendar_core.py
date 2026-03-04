@@ -198,7 +198,7 @@ def build_quick_time_kb(
     prefix: str = "cal2",
     tail_parts: tuple[str, ...] = (),
 ) -> InlineKeyboardMarkup:
-    """Build quick-time keyboard in HH:MM format and manual option."""
+    """Build quick-time keyboard in HH:MM format and picker option."""
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -221,8 +221,8 @@ def build_quick_time_kb(
             ],
             [
                 InlineKeyboardButton(
-                    text="Ввести вручную",
-                    callback_data=_cb(prefix, sid, "time", "manual", tail_parts=tail_parts),
+                    text="Открыть роллер",
+                    callback_data=_cb(prefix, sid, "time", "picker", tail_parts=tail_parts),
                 )
             ],
         ]
@@ -290,7 +290,7 @@ def parse_calendar_callback(data: str, *, prefix: str = "cal2") -> tuple[str, di
     if tag == "quick" and len(parts) == 4 and parts[3] in {"today", "tomorrow", "plus7"}:
         return "quick", {"sid": sid, "value": parts[3]}
 
-    if tag == "time" and len(parts) == 4 and parts[3] in {"0900", "1200", "1800", "2000", "manual"}:
+    if tag == "time" and len(parts) == 4 and parts[3] in {"0900", "1200", "1800", "2000", "picker"}:
         return "time", {"sid": sid, "value": parts[3]}
 
     return None

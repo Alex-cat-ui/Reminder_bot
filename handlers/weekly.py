@@ -12,14 +12,8 @@ router = Router()
 
 
 def _week_bounds(now: datetime) -> tuple[datetime, datetime]:
-    """Return (monday 00:00, sunday 23:59) for the current week."""
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    # go to start of today, then find Sunday 23:59
-    days_until_sunday = 6 - now.weekday()
-    end = (start + timedelta(days=days_until_sunday)).replace(
-        hour=23, minute=59, second=59, microsecond=0
-    )
-    return start, end
+    """Return rolling window bounds: [now, now + 7 days]."""
+    return now, now + timedelta(days=7)
 
 
 @router.message(F.text == "Мои активности на неделю")

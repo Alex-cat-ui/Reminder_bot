@@ -19,7 +19,6 @@ from aiogram.types import (
 )
 
 import db as database
-from notes_fmt import format_notes
 from scheduler import schedule_event_jobs
 from .calendar_core import (
     build_date_calendar_kb,
@@ -32,6 +31,13 @@ from .calendar_core import (
 from .duplicates import has_duplicate_event
 from .metrics_utils import bump_metric
 from .start import MAIN_MENU
+from .time_picker import (
+    apply_picker_step,
+    build_time_picker_kb,
+    parse_time_picker_callback,
+    picker_initial_now,
+    picker_initial_now_plus_1h,
+)
 from .texts import (
     MSG_ACTIVITY_LEN,
     MSG_CALENDAR_STEP,
@@ -45,15 +51,12 @@ from .texts import (
     MSG_EDIT_CALENDAR_STEP,
     MSG_ENTER_ACTIVITY,
     MSG_ENTER_NEW_ACTIVITY,
-    MSG_ENTER_NOTES,
-    MSG_ENTER_NEW_NOTES,
-    MSG_ENTER_TIME_MANUAL,
     MSG_INVALID_ACTION,
     MSG_INVALID_DATE,
     MSG_PICK_DATE_WITH_BUTTONS,
+    MSG_PICK_TIME_WITH_BUTTONS,
     MSG_SET_TZ_FIRST,
     MSG_STALE_CALENDAR,
-    MSG_TIME_PARSE_ERROR,
     MSG_TIME_PAST,
     MSG_TIME_STEP,
     MSG_WHAT_TO_EDIT,
@@ -67,7 +70,6 @@ class WizardStates(StatesGroup):
     waiting_calendar_date = State()
     waiting_time_after_calendar = State()
     waiting_activity = State()
-    waiting_notes = State()
     confirm = State()
     edit_choice = State()
 
@@ -125,6 +127,33 @@ def _parse_duplicate_callback(data: str) -> tuple[str, str] | None:
     if len(parts) != 3 or parts[0] != "dup2" or parts[2] not in {"save", "cancel"}:
         return None
     return parts[1], parts[2]
+
+
+def _time_picker_text(tz_name: str, hour: int, minute: int) -> str:
+    return (
+        f"{_with_tz_line(STEP_TIME, tz_name)}\n"
+        f"Текущее значение: {hour:02d}:{minute:02d}"
+    )
+
+
+async def _open_create_time_picker(
+    message: Message,
+    state: FSMContext,
+    *,
+    tz_name: str,
+) -> None:
+    sid = new_calendar_session_id()
+    hour, minute = picker_initial_now(tz_name)
+    await state.update_data(
+        tp_sid=sid,
+        tp_hour=hour,
+        tp_minute=minute,
+    )
+    sent = await message.answer(
+        _time_picker_text(tz_name, hour, minute),
+        reply_markup=build_time_picker_kb(sid, hour, minute),
+    )
+    await state.update_data(tp_message_id=sent.message_id)
 
 
 async def _start_calendar_step(message: Message, state: FSMContext, tz_name: str) -> None:
@@ -208,7 +237,6 @@ async def start_wizard(message: Message, state: FSMContext) -> None:
 @router.message(WizardStates.waiting_calendar_date, F.text == "Отмена")
 @router.message(WizardStates.waiting_time_after_calendar, F.text == "Отмена")
 @router.message(WizardStates.waiting_activity, F.text == "Отмена")
-@router.message(WizardStates.waiting_notes, F.text == "Отмена")
 @router.message(WizardStates.confirm, F.text == "Отмена")
 @router.message(WizardStates.edit_choice, F.text == "Отмена")
 async def cancel_wizard(message: Message, state: FSMContext) -> None:
@@ -389,10 +417,16 @@ async def on_quick_time(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(MSG_INVALID_ACTION)
         return
 
-    if parsed["value"] == "manual":
+    if parsed["value"] == "picker":
+        if not data.get("selected_date_iso"):
+            await bump_metric("callback_stale_session")
+            await callback.answer(MSG_STALE_CALENDAR)
+            if callback.message:
+                await callback.message.answer(MSG_PICK_DATE_WITH_BUTTONS)
+            return
         await callback.answer()
         if callback.message:
-            await callback.message.answer(MSG_ENTER_TIME_MANUAL)
+            await _open_create_time_picker(callback.message, state, tz_name=tz_name)
         return
 
     hhmm = parsed["value"]
@@ -415,6 +449,92 @@ async def on_quick_time(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.message.answer(MSG_ENTER_ACTIVITY)
 
 
+@router.callback_query(WizardStates.waiting_time_after_calendar, F.data.startswith("tmr2:"))
+async def on_create_time_picker(callback: CallbackQuery, state: FSMContext) -> None:
+    user_id = callback.from_user.id  # type: ignore[union-attr]
+    if is_debounced(user_id):
+        await bump_metric("callback_debounce_reject")
+        await callback.answer(MSG_DEBOUNCE)
+        return
+
+    payload = parse_time_picker_callback(callback.data or "")
+    if payload is None:
+        await bump_metric("callback_invalid_payload")
+        await callback.answer(MSG_INVALID_ACTION)
+        return
+
+    kind, parsed = payload
+    data = await state.get_data()
+    expected_sid = data.get("tp_sid")
+    tz_name = data.get("timezone")
+
+    if not expected_sid or not tz_name:
+        await bump_metric("callback_stale_session")
+        await callback.answer(MSG_STALE_CALENDAR)
+        return
+
+    if parsed.get("sid") != expected_sid:
+        await bump_metric("callback_stale_session")
+        await callback.answer(MSG_STALE_CALENDAR)
+        return
+
+    if callback.message is None:
+        await bump_metric("callback_invalid_payload")
+        await callback.answer(MSG_INVALID_ACTION)
+        return
+
+    if kind == "noop":
+        await callback.answer()
+        return
+
+    if kind == "cancel":
+        await state.update_data(tp_sid=None, tp_message_id=None)
+        await callback.answer()
+        cal_sid = data.get("cal_session_id")
+        if not cal_sid:
+            await bump_metric("callback_stale_session")
+            await callback.message.answer(MSG_STALE_CALENDAR)
+            return
+        await callback.message.answer(
+            _with_tz_line(STEP_TIME, tz_name),
+            reply_markup=build_quick_time_kb(cal_sid, prefix="cal2"),
+        )
+        return
+
+    if kind == "ok":
+        hour = int(data.get("tp_hour", 0))
+        minute = int(data.get("tp_minute", 0))
+        ok, error = await _apply_selected_time(state, tz_name, hour, minute)
+        if not ok:
+            await callback.answer()
+            await callback.message.answer(error or MSG_INVALID_ACTION)
+            return
+        await callback.answer()
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await callback.message.answer(MSG_ENTER_ACTIVITY)
+        return
+
+    hour = int(data.get("tp_hour", 0))
+    minute = int(data.get("tp_minute", 0))
+    if kind == "quick":
+        hour, minute = picker_initial_now_plus_1h(tz_name)
+    else:
+        hour, minute = apply_picker_step(hour, minute, kind, parsed.get("value"))
+
+    await state.update_data(tp_hour=hour, tp_minute=minute)
+    try:
+        await callback.message.edit_text(
+            _time_picker_text(tz_name, hour, minute),
+            reply_markup=build_time_picker_kb(expected_sid, hour, minute),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
+
+
 @router.message(WizardStates.waiting_calendar_date)
 async def waiting_calendar_date_text_fallback(message: Message) -> None:
     await message.answer(MSG_PICK_DATE_WITH_BUTTONS)
@@ -422,30 +542,7 @@ async def waiting_calendar_date_text_fallback(message: Message) -> None:
 
 @router.message(WizardStates.waiting_time_after_calendar)
 async def process_time_after_calendar(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    tz_name = data.get("timezone")
-    if not tz_name:
-        await message.answer(MSG_STALE_CALENDAR)
-        return
-
-    text = (message.text or "").strip().lower()
-
-    from date_parser import _parse_time_str
-
-    tz = ZoneInfo(tz_name)
-    now = datetime.now(tz)
-    parsed_time = _parse_time_str(text, now, tz)
-    if parsed_time is None:
-        await bump_metric("time_parse_error")
-        await message.answer(MSG_TIME_PARSE_ERROR)
-        return
-
-    ok, error = await _apply_selected_time(state, tz_name, parsed_time[0], parsed_time[1])
-    if not ok:
-        await message.answer(error or MSG_INVALID_ACTION)
-        return
-
-    await message.answer(MSG_ENTER_ACTIVITY)
+    await message.answer(MSG_PICK_TIME_WITH_BUTTONS)
 
 
 @router.message(WizardStates.waiting_activity)
@@ -455,15 +552,6 @@ async def process_activity(message: Message, state: FSMContext) -> None:
         await message.answer(MSG_ACTIVITY_LEN)
         return
     await state.update_data(activity=text)
-    await state.set_state(WizardStates.waiting_notes)
-    await message.answer(MSG_ENTER_NOTES)
-
-
-@router.message(WizardStates.waiting_notes)
-async def process_notes(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip()
-    notes = format_notes(text)
-    await state.update_data(notes=notes)
     await state.set_state(WizardStates.confirm)
     await state.update_data(create_dup_sid=None)
     data = await state.get_data()
@@ -476,7 +564,6 @@ async def _show_confirmation(message: Message, data: dict) -> None:
     text = format_event_preview(
         dt=dt,
         activity=data["activity"],
-        notes=data.get("notes"),
         tz_name=tz_name,
         mode="create",
     )
@@ -539,7 +626,7 @@ async def _finalize_create(
         user_id=user_id,
         event_dt=dt.isoformat(),
         activity=activity,
-        notes=data.get("notes"),
+        notes=None,
     )
     await schedule_event_jobs(event_id, dt, user_id)
     await bump_metric("create_success")
@@ -566,6 +653,9 @@ async def on_create_duplicate_decision(callback: CallbackQuery, state: FSMContex
     if action == "cancel":
         await state.update_data(create_dup_sid=None)
         await callback.answer()
+        if callback.message:
+            data = await state.get_data()
+            await _show_confirmation(callback.message, data)
         return
 
     ok, error = await _finalize_create(
@@ -590,7 +680,6 @@ async def edit_choice(message: Message, state: FSMContext) -> None:
         keyboard=[
             [KeyboardButton(text="Дата/время")],
             [KeyboardButton(text="Активность")],
-            [KeyboardButton(text="Заметки")],
             [KeyboardButton(text="Отмена")],
         ],
         resize_keyboard=True,
@@ -617,12 +706,6 @@ async def edit_date(message: Message, state: FSMContext) -> None:
 async def edit_activity(message: Message, state: FSMContext) -> None:
     await state.set_state(WizardStates.waiting_activity)
     await message.answer(MSG_ENTER_NEW_ACTIVITY, reply_markup=CANCEL_KB)
-
-
-@router.message(WizardStates.edit_choice, F.text == "Заметки")
-async def edit_notes(message: Message, state: FSMContext) -> None:
-    await state.set_state(WizardStates.waiting_notes)
-    await message.answer(MSG_ENTER_NEW_NOTES, reply_markup=CANCEL_KB)
 
 
 @router.message(WizardStates.confirm)

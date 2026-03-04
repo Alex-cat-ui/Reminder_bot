@@ -27,26 +27,22 @@ MSG_UNAUTHORIZED = "Задача не найдена или недоступна
 
 MSG_ENTER_ACTIVITY = "Введите активность (1-200 символов):"
 MSG_ACTIVITY_LEN = "Активность должна быть от 1 до 200 символов."
-MSG_ENTER_NOTES = "Введите заметки (или '-' если без заметок). Перечисление через запятую станет списком:"
-MSG_ENTER_TIME_MANUAL = "Введите время вручную (например: 18:00, вечером)."
-MSG_ENTER_TIME_MANUAL_EDIT = "Введите новое время вручную (например: 18:00, вечером)."
 MSG_PICK_DATE_WITH_BUTTONS = "Выберите дату кнопками календаря или нажмите 'Отмена'."
+MSG_PICK_TIME_WITH_BUTTONS = "Выберите время кнопками."
 MSG_CONFIRM_FALLBACK = "Нажмите 'Подтвердить', 'Изменить' или 'Отмена'."
-MSG_EDIT_MENU_FALLBACK = "Используйте кнопки 'Дата/время', 'Активность', 'Заметки' или 'Отмена'."
+MSG_EDIT_MENU_FALLBACK = "Используйте кнопки 'Дата/время', 'Активность' или 'Отмена'."
 MSG_CALENDAR_STEP = "Шаг 1/4. Выберите дату в календаре."
-MSG_TIME_STEP = "Шаг 2/4. Введите время (например: 18:00, вечером)."
+MSG_TIME_STEP = "Шаг 2/4. Выберите время кнопками."
 MSG_EDIT_CALENDAR_STEP = "Шаг 1/2. Выберите новую дату в календаре."
-MSG_EDIT_TIME_STEP = "Шаг 2/2. Введите новое время (например: 18:00, вечером)."
+MSG_EDIT_TIME_STEP = "Шаг 2/2. Выберите новое время кнопками."
 MSG_ENTER_NEW_ACTIVITY = "Введите новую активность (1-200 символов):"
-MSG_ENTER_NEW_NOTES = "Введите новые заметки (или '-' если без заметок)."
-
-MSG_TIME_PARSE_ERROR = "Не понял время. Попробуйте снова (например: 18:00, вечером)."
 MSG_TIME_PAST = "Это время уже прошло для выбранной даты. Введите более позднее время."
 
 MSG_WEEK_EMPTY = "На этой неделе нет активных напоминаний."
 MSG_WEEK_EDIT_PROMPT = "Выберите, что изменить:"
 MSG_BROWSER_CLOSED = "Список закрыт."
 MSG_BROWSER_EMPTY = "Список пуст."
+MSG_BROWSER_CONTEXT_LOST = "Контекст списка потерян. Возврат в главное меню."
 MSG_CLONE_CREATED = "Копия задачи создана."
 
 MSG_SNOOZE_LIMIT = "Лимит откладываний достигнут (25)."
@@ -62,17 +58,14 @@ def format_event_preview(
     *,
     dt: datetime,
     activity: str,
-    notes: str | None,
     tz_name: str,
     mode: str = "create",
 ) -> str:
     """Unified preview text with explicit timezone."""
     header = "Проверьте напоминание:" if mode == "create" else "Проверьте изменения:"
     dt_str = dt.strftime("%d.%m.%Y %H:%M")
-    notes_str = notes or "—"
     return (
         f"{header}\n\n"
         f"Когда: {dt_str} ({tz_name})\n"
-        f"Активность: {activity}\n"
-        f"Заметки:\n{notes_str}"
+        f"Активность: {activity}"
     )

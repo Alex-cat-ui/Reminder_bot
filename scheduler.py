@@ -34,13 +34,18 @@ def compute_job_times(
     Rules:
     - day_before: the day before at 12:00 (if > 24h away)
     - hour_before: 1 hour before (if > 60 min away)
-    - soon: immediately if < 60 min away
+    - at_time: exact event time
+    - for deltas <= 60 min: schedule only at_time
     """
     jobs: list[tuple[str, datetime]] = []
     delta = event_dt - now
 
     if delta.total_seconds() <= 0:
         return jobs
+
+    # Near events must not produce parallel close reminders.
+    if delta.total_seconds() <= 3600:
+        return [("at_time", event_dt)]
 
     # day_before: run at 12:00 the day before event
     day_before_dt = (event_dt - timedelta(days=1)).replace(
@@ -53,11 +58,6 @@ def compute_job_times(
     hour_before_dt = event_dt - timedelta(hours=1)
     if hour_before_dt > now and delta.total_seconds() > 3600:
         jobs.append(("hour_before", hour_before_dt))
-
-    # soon: if less than 60 min away, fire now + 5 sec
-    if delta.total_seconds() <= 3600:
-        soon_dt = now + timedelta(seconds=5)
-        jobs.append(("soon", soon_dt))
 
     # at_time: fire at exact event time
     jobs.append(("at_time", event_dt))
@@ -74,12 +74,8 @@ def _reminder_text(job_type: str, event: dict) -> str:
         prefix = "Напоминание: завтра"
     elif job_type == "hour_before":
         prefix = "Напоминание: через час"
-    elif job_type == "soon":
-        prefix = "Напоминание: событие скоро"
     elif job_type == "at_time":
         prefix = "Напоминание: время события наступило"
-    elif job_type == "snooze":
-        prefix = "Напоминание (отложенное)"
     else:
         prefix = "Напоминание"
 
@@ -89,8 +85,6 @@ def _reminder_text(job_type: str, event: dict) -> str:
     dt_formatted = event_dt.strftime("%d.%m.%Y %H:%M")
     lines.append(f"Когда: {dt_formatted}")
     lines.append(f"Активность: {event['activity']}")
-    if event.get("notes"):
-        lines.append(f"Заметки:\n{event['notes']}")
     return "\n".join(lines)
 
 
@@ -157,7 +151,7 @@ async def schedule_event_jobs(event_id: int, event_dt: datetime, user_id: int, n
 
 
 async def schedule_snooze(event_id: int) -> datetime | None:
-    """Schedule a snooze (+1 hour from now). Returns new reminder time or None if limit reached."""
+    """Snooze by +1 hour in user TZ by rescheduling the event timeline."""
     event = await database.get_event(event_id, path=_db_path)
     if not event or event["status"] != "active":
         return None
@@ -171,25 +165,14 @@ async def schedule_snooze(event_id: int) -> datetime | None:
     user = await database.get_user(event["user_id"], path=_db_path)
     tz = ZoneInfo(user["timezone"]) if user else ZoneInfo("Europe/Moscow")
     now = datetime.now(tz)
-    run_dt = now + timedelta(hours=1)
-    job_id = _make_job_id()
+    new_dt = now + timedelta(hours=1)
 
-    scheduler.add_job(
-        _send_reminder,
-        "date",
-        run_date=run_dt,
-        args=[event_id, "snooze"],
-        id=job_id,
-    )
-    await database.create_job(
-        event_id=event_id,
-        job_type="snooze",
-        run_dt=run_dt.isoformat(),
-        scheduler_job_id=job_id,
-        path=_db_path,
-    )
-    logger.info("Snoozed event %d (count=%d), next at %s", event_id, new_count, run_dt)
-    return run_dt
+    await database.update_event_datetime(event_id, new_dt.isoformat(), path=_db_path)
+    await cancel_event_jobs(event_id)
+    await schedule_event_jobs(event_id, new_dt, event["user_id"], now=now)
+
+    logger.info("Snoozed event %d (count=%d), rescheduled to %s", event_id, new_count, new_dt)
+    return new_dt
 
 
 async def cancel_event_jobs(event_id: int) -> None:

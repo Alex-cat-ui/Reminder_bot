@@ -40,14 +40,14 @@ class TestComputeJobTimes:
         assert "hour_before" in types
         assert "at_time" in types
 
-    def test_soon_and_at_time(self):
-        """Event < 60 min away: should get 'soon' AND 'at_time'."""
+    def test_only_at_time_for_event_within_60_minutes(self):
+        """Event < 60 min away: schedule only at_time."""
         now = datetime(2025, 6, 12, 17, 30, tzinfo=TZ)
         event_dt = datetime(2025, 6, 12, 18, 0, tzinfo=TZ)
         jobs = compute_job_times(event_dt, now)
         types = [j[0] for j in jobs]
-        assert "soon" in types
         assert "at_time" in types
+        assert len(types) == 1
         assert "hour_before" not in types
 
     def test_at_time_fires_at_event_dt(self):
@@ -59,14 +59,13 @@ class TestComputeJobTimes:
         assert len(at_time) == 1
         assert at_time[0][1] == event_dt
 
-    def test_at_time_not_skipped_with_soon(self):
-        """Even when 'soon' is scheduled, 'at_time' must still be present."""
-        now = datetime(2025, 6, 12, 17, 50, tzinfo=TZ)
+    def test_exactly_60_minutes_schedules_only_at_time(self):
+        """Boundary at exactly 60 minutes: only at_time."""
+        now = datetime(2025, 6, 12, 17, 0, tzinfo=TZ)
         event_dt = datetime(2025, 6, 12, 18, 0, tzinfo=TZ)
         jobs = compute_job_times(event_dt, now)
         types = [j[0] for j in jobs]
-        assert "soon" in types
-        assert "at_time" in types
+        assert types == ["at_time"]
 
     def test_past_event_no_jobs(self):
         """Event in the past: no jobs."""
@@ -97,13 +96,13 @@ class TestReminderText:
         text = _reminder_text("at_time", event)
         assert "12.06.2025 18:30" in text
 
-    def test_date_format_soon(self):
-        """Date format should be correct for 'soon' job type."""
+    def test_date_format_fallback_type(self):
+        """Date format should be correct for unknown job type as well."""
         event = {
             "event_dt": "2025-12-25T09:15:00+03:00",
             "activity": "Christmas",
             "notes": None,
         }
-        text = _reminder_text("soon", event)
+        text = _reminder_text("unknown", event)
         assert "25.12.2025 09:15" in text
-        assert "событие скоро" in text
+        assert text.startswith("Напоминание")

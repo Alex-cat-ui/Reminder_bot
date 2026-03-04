@@ -93,7 +93,7 @@ def test_quick_times_callbacks_are_hhmm_only():
         f"cal2:{sid}:time:1800",
         f"cal2:{sid}:time:2000",
     ]
-    assert kb.inline_keyboard[1][0].callback_data == f"cal2:{sid}:time:manual"
+    assert kb.inline_keyboard[1][0].callback_data == f"cal2:{sid}:time:picker"
 
 
 def test_invalid_session_rejected():

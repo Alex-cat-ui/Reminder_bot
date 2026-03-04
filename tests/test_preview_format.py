@@ -11,7 +11,6 @@ def test_preview_contains_absolute_datetime_and_timezone():
     text = format_event_preview(
         dt=dt,
         activity="Тренировка",
-        notes="Взять форму",
         tz_name="Europe/Moscow",
         mode="create",
     )
@@ -20,14 +19,13 @@ def test_preview_contains_absolute_datetime_and_timezone():
     assert "Активность: Тренировка" in text
 
 
-def test_preview_notes_dash_when_empty():
+def test_preview_contains_only_datetime_and_activity():
     dt = datetime(2026, 7, 2, 18, 30, tzinfo=ZoneInfo("Europe/Moscow"))
     text = format_event_preview(
         dt=dt,
         activity="Тренировка",
-        notes=None,
         tz_name="Europe/Moscow",
         mode="edit",
     )
-    assert "Заметки:\n—" in text
+    assert "Заметки" not in text
     assert "Проверьте изменения:" in text

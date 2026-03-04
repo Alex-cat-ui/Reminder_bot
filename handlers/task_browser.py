@@ -33,11 +33,18 @@ from .calendar_core import (
     parse_calendar_callback_with_event,
 )
 from .duplicates import has_duplicate_event
-from .event_edit import start_edit_menu_for_event
 from .metrics_utils import bump_metric
 from .start import MAIN_MENU
+from .time_picker import (
+    apply_picker_step,
+    build_time_picker_kb,
+    parse_time_picker_callback,
+    picker_initial_now,
+    picker_initial_now_plus_1h,
+)
 from .texts import (
     MSG_BROWSER_CLOSED,
+    MSG_BROWSER_CONTEXT_LOST,
     MSG_BROWSER_EMPTY,
     MSG_CALENDAR_UPDATED,
     MSG_CLONE_CREATED,
@@ -47,9 +54,10 @@ from .texts import (
     MSG_DUPLICATE_WARNING,
     MSG_EDIT_CANCELLED,
     MSG_INVALID_ACTION,
+    MSG_PICK_DATE_WITH_BUTTONS,
     MSG_SET_TZ_FIRST,
     MSG_STALE_CALENDAR,
-    MSG_TIME_PARSE_ERROR,
+    MSG_PICK_TIME_WITH_BUTTONS,
     MSG_TIME_PAST,
     MSG_UNAUTHORIZED,
     MSG_UNDO_EXPIRED,
@@ -70,7 +78,7 @@ class BrowserStates(StatesGroup):
 FILTER_RU = {
     "today": "Сегодня",
     "tomorrow": "Завтра",
-    "week": "Неделя",
+    "week": "Следующие 7 дней",
     "all": "Все",
 }
 
@@ -95,11 +103,8 @@ def _bounds_for_filter(filter_name: str, now: datetime) -> tuple[str | None, str
         end_tomorrow = end_today + timedelta(days=1)
         return start_tomorrow.isoformat(), end_tomorrow.isoformat()
 
-    # week
-    days_until_sunday = 6 - now.weekday()
-    end_week = (start_today + timedelta(days=days_until_sunday)).replace(
-        hour=23, minute=59, second=59, microsecond=0
-    )
+    # week = rolling window: now .. now+7 days
+    end_week = now + timedelta(days=7)
     return now.isoformat(), end_week.isoformat()
 
 
@@ -171,11 +176,9 @@ async def _build_browser_payload(
     else:
         for idx, ev in enumerate(events, start=offset + 1):
             dt = datetime.fromisoformat(ev["event_dt"])
-            notes_flag = "да" if ev.get("notes") else "нет"
             lines.append(
                 f"{idx}. {dt.strftime('%d.%m.%Y %H:%M')} ({tz_name})\n"
-                f"Активность: {_short_activity(ev['activity'])}\n"
-                f"Заметки: {notes_flag}"
+                f"Активность: {_short_activity(ev['activity'])}"
             )
             lines.append("")
 
@@ -185,7 +188,7 @@ async def _build_browser_payload(
         [
             InlineKeyboardButton(text="Сегодня", callback_data=f"br2:{sid}:f:today:p:1"),
             InlineKeyboardButton(text="Завтра", callback_data=f"br2:{sid}:f:tomorrow:p:1"),
-            InlineKeyboardButton(text="Неделя", callback_data=f"br2:{sid}:f:week:p:1"),
+            InlineKeyboardButton(text="7 дней", callback_data=f"br2:{sid}:f:week:p:1"),
             InlineKeyboardButton(text="Все", callback_data=f"br2:{sid}:f:all:p:1"),
         ],
         [
@@ -244,6 +247,93 @@ async def _refresh_browser_message(callback: CallbackQuery, state: FSMContext, *
     await state.update_data(browser_filter=filter_name, browser_page=page)
 
 
+def _extract_browser_context(data: dict) -> tuple[str, str, int, str, int] | None:
+    sid = data.get("browser_sid")
+    filter_name = data.get("browser_filter")
+    page_raw = data.get("browser_page")
+    tz_name = data.get("browser_timezone")
+    message_id_raw = data.get("browser_message_id")
+
+    if not sid or not isinstance(sid, str):
+        return None
+    if filter_name not in FILTER_RU:
+        return None
+    if not tz_name or not isinstance(tz_name, str):
+        return None
+
+    try:
+        page = int(page_raw)
+        message_id = int(message_id_raw)
+    except (TypeError, ValueError):
+        return None
+
+    if page < 1 or message_id < 1:
+        return None
+
+    return sid, filter_name, page, tz_name, message_id
+
+
+async def return_to_browser_context(
+    message: Message,
+    state: FSMContext,
+    *,
+    user_id: int,
+    notice_text: str | None = None,
+) -> bool:
+    data = await state.get_data()
+    if not data.get("return_to_browser"):
+        return False
+
+    ctx = _extract_browser_context(data)
+    if ctx is None:
+        await state.clear()
+        await message.answer(MSG_BROWSER_CONTEXT_LOST, reply_markup=MAIN_MENU)
+        return True
+
+    sid, filter_name, requested_page, tz_name, browser_message_id = ctx
+    text, kb, page, _ = await _build_browser_payload(
+        user_id=user_id,
+        tz_name=tz_name,
+        sid=sid,
+        filter_name=filter_name,
+        page=requested_page,
+    )
+
+    new_message_id = browser_message_id
+    try:
+        await message.bot.edit_message_text(
+            text=text,
+            chat_id=message.chat.id,
+            message_id=browser_message_id,
+            reply_markup=kb,
+        )
+    except TelegramBadRequest as exc:
+        lowered = str(exc).lower()
+        if "message is not modified" not in lowered:
+            if "message to edit not found" in lowered:
+                sent = await message.answer(text, reply_markup=kb)
+                new_message_id = sent.message_id
+            else:
+                await state.clear()
+                await message.answer(MSG_BROWSER_CONTEXT_LOST, reply_markup=MAIN_MENU)
+                return True
+
+    await state.clear()
+    await state.set_state(BrowserStates.viewing)
+    await state.update_data(
+        return_to_browser=True,
+        browser_sid=sid,
+        browser_filter=filter_name,
+        browser_page=page,
+        browser_timezone=tz_name,
+        browser_message_id=new_message_id,
+    )
+
+    if notice_text:
+        await message.answer(notice_text)
+    return True
+
+
 async def start_tasks_browser(
     message: Message,
     state: FSMContext,
@@ -269,6 +359,7 @@ async def start_tasks_browser(
 
     await state.set_state(BrowserStates.viewing)
     await state.update_data(
+        return_to_browser=True,
         browser_sid=sid,
         browser_filter=default_filter,
         browser_page=page,
@@ -371,11 +462,15 @@ async def on_browser_callback(callback: CallbackQuery, state: FSMContext) -> Non
         return
 
     if kind == "edit":
+        from .event_edit import start_edit_menu_for_event
+
+        await state.update_data(return_to_browser=True)
         ok, error = await start_edit_menu_for_event(
             callback.message,
             state,
             user_id=user_id,
             event_id=event_id,
+            return_to_browser=True,
         )
         await callback.answer()
         if not ok and error:
@@ -384,6 +479,7 @@ async def on_browser_callback(callback: CallbackQuery, state: FSMContext) -> Non
 
     if kind == "clone":
         await callback.answer()
+        await state.update_data(return_to_browser=True)
         await _start_clone_calendar_step(
             callback.message,
             state,
@@ -421,7 +517,7 @@ _TOKEN_RE = re.compile(r"^[0-9a-f]{12}$")
 
 
 @router.callback_query(F.data.startswith("undo2:"))
-async def on_undo_callback(callback: CallbackQuery) -> None:
+async def on_undo_callback(callback: CallbackQuery, state: FSMContext | None = None) -> None:
     token = (callback.data or "").split(":", 1)[1] if ":" in (callback.data or "") else ""
     if _TOKEN_RE.match(token) is None:
         await bump_metric("callback_invalid_payload")
@@ -467,7 +563,16 @@ async def on_undo_callback(callback: CallbackQuery) -> None:
             await callback.message.edit_reply_markup(reply_markup=None)
         except TelegramBadRequest:
             pass
-        await callback.message.answer(MSG_UNDO_RESTORED)
+        restored = False
+        if state is not None:
+            restored = await return_to_browser_context(
+                callback.message,
+                state,
+                user_id=user_id,
+                notice_text=MSG_UNDO_RESTORED,
+            )
+        if not restored:
+            await callback.message.answer(MSG_UNDO_RESTORED)
 
 
 # ---------- Clone flow ----------
@@ -490,6 +595,10 @@ def _clone_bounds(tz_name: str) -> tuple[date, date]:
 
 def _with_tz_line(base: str, tz_name: str) -> str:
     return f"{base}\nЧасовой пояс: {tz_name}"
+
+
+def _clone_time_picker_text(tz_name: str, hour: int, minute: int) -> str:
+    return f"{_with_tz_line('Шаг 2/2. Выберите новое время кнопками.', tz_name)}\nТекущее значение: {hour:02d}:{minute:02d}"
 
 
 def _clone_confirm_kb(sid: str, source_event_id: int) -> InlineKeyboardMarkup:
@@ -528,7 +637,6 @@ async def _start_clone_calendar_step(
         clone_timezone=tz_name,
         clone_selected_date_iso=None,
         clone_activity=source_event["activity"],
-        clone_notes=source_event.get("notes"),
         clone_dup_sid=None,
         clone_dup_override=False,
     )
@@ -548,6 +656,17 @@ async def _start_clone_calendar_step(
     )
     sent = await message.answer(step_text, reply_markup=kb)
     await state.update_data(clone_message_id=sent.message_id)
+
+
+async def _open_clone_time_picker(message: Message, state: FSMContext, *, tz_name: str) -> None:
+    sid = new_calendar_session_id()
+    hour, minute = picker_initial_now(tz_name)
+    await state.update_data(clone_tp_sid=sid, clone_tp_hour=hour, clone_tp_minute=minute)
+    sent = await message.answer(
+        _clone_time_picker_text(tz_name, hour, minute),
+        reply_markup=build_time_picker_kb(sid, hour, minute),
+    )
+    await state.update_data(clone_tp_message_id=sent.message_id)
 
 
 async def _apply_clone_time(
@@ -589,7 +708,6 @@ async def _finalize_clone(state: FSMContext, user_id: int) -> tuple[bool, str | 
     data = await state.get_data()
     dt_iso = data.get("clone_event_dt_iso")
     activity = data.get("clone_activity")
-    notes = data.get("clone_notes")
 
     if not dt_iso or not activity:
         return False, MSG_INVALID_ACTION
@@ -609,11 +727,12 @@ async def _finalize_clone(state: FSMContext, user_id: int) -> tuple[bool, str | 
         user_id=user_id,
         event_dt=dt_iso,
         activity=activity,
-        notes=notes,
+        notes=None,
     )
     await schedule_event_jobs(event_id, dt, user_id)
     await bump_metric("clone_created")
-    await state.clear()
+    if not data.get("return_to_browser"):
+        await state.clear()
     return True, None
 
 
@@ -621,8 +740,15 @@ async def _finalize_clone(state: FSMContext, user_id: int) -> tuple[bool, str | 
 @router.message(BrowserStates.clone_waiting_time, F.text == "Отмена")
 @router.message(BrowserStates.clone_confirm, F.text == "Отмена")
 async def cancel_clone_by_text(message: Message, state: FSMContext) -> None:
-    await state.clear()
-    await message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
+    restored = await return_to_browser_context(
+        message,
+        state,
+        user_id=message.from_user.id,  # type: ignore[union-attr]
+        notice_text=MSG_EDIT_CANCELLED,
+    )
+    if not restored:
+        await state.clear()
+        await message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
 
 
 @router.callback_query(BrowserStates.clone_waiting_calendar_date, F.data.startswith("cln2:"))
@@ -660,10 +786,17 @@ async def on_clone_calendar(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     if kind == "cancel":
-        await state.clear()
         await callback.answer()
         if callback.message:
-            await callback.message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
+            restored = await return_to_browser_context(
+                callback.message,
+                state,
+                user_id=user_id,
+                notice_text=MSG_EDIT_CANCELLED,
+            )
+            if not restored:
+                await state.clear()
+                await callback.message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
         return
 
     if callback.message is None:
@@ -743,7 +876,7 @@ async def on_clone_calendar(callback: CallbackQuery, state: FSMContext) -> None:
 
         await callback.answer()
         await callback.message.answer(
-            _with_tz_line("Шаг 2/2. Введите новое время (например: 18:00, вечером).", tz_name),
+            _with_tz_line("Шаг 2/2. Выберите новое время кнопками.", tz_name),
             reply_markup=build_quick_time_kb(
                 sid,
                 prefix="cln2",
@@ -773,8 +906,9 @@ async def on_clone_time(callback: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     sid = data.get("clone_sid")
     source_event_id = data.get("clone_source_event_id")
+    tz_name = data.get("clone_timezone")
 
-    if not sid or not source_event_id:
+    if not sid or not source_event_id or not tz_name:
         await bump_metric("callback_stale_session")
         await callback.answer(MSG_STALE_CALENDAR)
         return
@@ -789,20 +923,33 @@ async def on_clone_time(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     if kind == "cancel":
-        await state.clear()
         await callback.answer()
         if callback.message:
-            await callback.message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
+            restored = await return_to_browser_context(
+                callback.message,
+                state,
+                user_id=user_id,
+                notice_text=MSG_EDIT_CANCELLED,
+            )
+            if not restored:
+                await state.clear()
+                await callback.message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
         return
 
     if kind != "time":
         await callback.answer(MSG_INVALID_ACTION)
         return
 
-    if parsed["value"] == "manual":
+    if parsed["value"] == "picker":
+        if not data.get("clone_selected_date_iso"):
+            await bump_metric("callback_stale_session")
+            await callback.answer(MSG_STALE_CALENDAR)
+            if callback.message:
+                await callback.message.answer(MSG_PICK_DATE_WITH_BUTTONS)
+            return
         await callback.answer()
         if callback.message:
-            await callback.message.answer("Введите новое время вручную (например: 18:00, вечером).")
+            await _open_clone_time_picker(callback.message, state, tz_name=tz_name)
         return
 
     hhmm = parsed["value"]
@@ -823,7 +970,6 @@ async def on_clone_time(callback: CallbackQuery, state: FSMContext) -> None:
     preview = format_event_preview(
         dt=dt,
         activity=data["clone_activity"],
-        notes=data.get("clone_notes"),
         tz_name=data["clone_timezone"],
         mode="create",
     )
@@ -839,43 +985,111 @@ async def on_clone_time(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(BrowserStates.clone_waiting_time)
 async def clone_time_manual(message: Message, state: FSMContext) -> None:
-    text = (message.text or "").strip().lower()
+    await message.answer(MSG_PICK_TIME_WITH_BUTTONS)
 
-    from date_parser import _parse_time_str
 
+@router.callback_query(BrowserStates.clone_waiting_time, F.data.startswith("tmr2:"))
+async def on_clone_time_picker(callback: CallbackQuery, state: FSMContext) -> None:
+    user_id = callback.from_user.id  # type: ignore[union-attr]
+    if is_debounced(user_id):
+        await bump_metric("callback_debounce_reject")
+        await callback.answer(MSG_DEBOUNCE)
+        return
+
+    payload = parse_time_picker_callback(callback.data or "")
+    if payload is None:
+        await bump_metric("callback_invalid_payload")
+        await callback.answer(MSG_INVALID_ACTION)
+        return
+
+    kind, parsed = payload
     data = await state.get_data()
+    expected_sid = data.get("clone_tp_sid")
     tz_name = data.get("clone_timezone")
-    if not tz_name:
-        await message.answer(MSG_STALE_CALENDAR)
+    source_event_id = data.get("clone_source_event_id")
+    clone_sid = data.get("clone_sid")
+
+    if not expected_sid or not tz_name or not source_event_id or not clone_sid:
+        await bump_metric("callback_stale_session")
+        await callback.answer(MSG_STALE_CALENDAR)
         return
 
-    tz = ZoneInfo(tz_name)
-    parsed = _parse_time_str(text, datetime.now(tz), tz)
-    if parsed is None:
-        await bump_metric("time_parse_error")
-        await message.answer(MSG_TIME_PARSE_ERROR)
+    if parsed.get("sid") != expected_sid:
+        await bump_metric("callback_stale_session")
+        await callback.answer(MSG_STALE_CALENDAR)
         return
 
-    ok, error = await _apply_clone_time(
-        state,
-        user_id=message.from_user.id,  # type: ignore[union-attr]
-        hour=parsed[0],
-        minute=parsed[1],
-    )
-    if not ok:
-        await message.answer(error or MSG_INVALID_ACTION)
+    if callback.message is None:
+        await bump_metric("callback_invalid_payload")
+        await callback.answer(MSG_INVALID_ACTION)
         return
 
-    data = await state.get_data()
-    dt = datetime.fromisoformat(data["clone_event_dt_iso"])
-    preview = format_event_preview(
-        dt=dt,
-        activity=data["clone_activity"],
-        notes=data.get("clone_notes"),
-        tz_name=data["clone_timezone"],
-        mode="create",
-    )
-    await message.answer(preview, reply_markup=_clone_confirm_kb(data["clone_sid"], data["clone_source_event_id"]))
+    if kind == "noop":
+        await callback.answer()
+        return
+
+    if kind == "cancel":
+        await state.update_data(clone_tp_sid=None, clone_tp_message_id=None)
+        await callback.answer()
+        await callback.message.answer(
+            _with_tz_line("Шаг 2/2. Выберите новое время кнопками.", tz_name),
+            reply_markup=build_quick_time_kb(
+                clone_sid,
+                prefix="cln2",
+                tail_parts=(str(source_event_id),),
+            ),
+        )
+        return
+
+    if kind == "ok":
+        hour = int(data.get("clone_tp_hour", 0))
+        minute = int(data.get("clone_tp_minute", 0))
+        ok, error = await _apply_clone_time(
+            state,
+            user_id=callback.from_user.id,  # type: ignore[union-attr]
+            hour=hour,
+            minute=minute,
+        )
+        if not ok:
+            await callback.answer()
+            await callback.message.answer(error or MSG_INVALID_ACTION)
+            return
+
+        data = await state.get_data()
+        dt = datetime.fromisoformat(data["clone_event_dt_iso"])
+        preview = format_event_preview(
+            dt=dt,
+            activity=data["clone_activity"],
+            tz_name=data["clone_timezone"],
+            mode="create",
+        )
+
+        await callback.answer()
+        try:
+            await callback.message.edit_reply_markup(reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        await callback.message.answer(
+            preview,
+            reply_markup=_clone_confirm_kb(data["clone_sid"], data["clone_source_event_id"]),
+        )
+        return
+
+    hour = int(data.get("clone_tp_hour", 0))
+    minute = int(data.get("clone_tp_minute", 0))
+    if kind == "quick":
+        hour, minute = picker_initial_now_plus_1h(tz_name)
+    else:
+        hour, minute = apply_picker_step(hour, minute, kind, parsed.get("value"))
+    await state.update_data(clone_tp_hour=hour, clone_tp_minute=minute)
+    try:
+        await callback.message.edit_text(
+            _clone_time_picker_text(tz_name, hour, minute),
+            reply_markup=build_time_picker_kb(expected_sid, hour, minute),
+        )
+    except TelegramBadRequest:
+        pass
+    await callback.answer()
 
 
 def _parse_clone_confirm_callback(data: str) -> tuple[str, str, int] | None:
@@ -908,10 +1122,17 @@ async def on_clone_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     if action == "cancel_confirm":
-        await state.clear()
         await callback.answer()
         if callback.message:
-            await callback.message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
+            restored = await return_to_browser_context(
+                callback.message,
+                state,
+                user_id=callback.from_user.id,  # type: ignore[union-attr]
+                notice_text=MSG_EDIT_CANCELLED,
+            )
+            if not restored:
+                await state.clear()
+                await callback.message.answer(MSG_EDIT_CANCELLED, reply_markup=MAIN_MENU)
         return
 
     ok, error = await _finalize_clone(state, callback.from_user.id)  # type: ignore[union-attr]
@@ -932,7 +1153,15 @@ async def on_clone_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 
     await callback.answer()
     if callback.message:
-        await callback.message.answer(MSG_CLONE_CREATED, reply_markup=MAIN_MENU)
+        restored = await return_to_browser_context(
+            callback.message,
+            state,
+            user_id=callback.from_user.id,  # type: ignore[union-attr]
+            notice_text=MSG_CLONE_CREATED,
+        )
+        if not restored:
+            await state.clear()
+            await callback.message.answer(MSG_CLONE_CREATED, reply_markup=MAIN_MENU)
 
 
 @router.callback_query(BrowserStates.clone_confirm, F.data.startswith("dup2:"))
@@ -953,6 +1182,24 @@ async def on_clone_duplicate_decision(callback: CallbackQuery, state: FSMContext
 
     if parts[2] == "cancel":
         await callback.answer()
+        if callback.message:
+            dt_iso = data.get("clone_event_dt_iso")
+            tz_name = data.get("clone_timezone")
+            activity = data.get("clone_activity")
+            sid = data.get("clone_sid")
+            source_event_id = data.get("clone_source_event_id")
+            if dt_iso and tz_name and activity and sid and source_event_id:
+                dt = datetime.fromisoformat(dt_iso)
+                preview = format_event_preview(
+                    dt=dt,
+                    activity=activity,
+                    tz_name=tz_name,
+                    mode="create",
+                )
+                await callback.message.answer(
+                    preview,
+                    reply_markup=_clone_confirm_kb(sid, source_event_id),
+                )
         return
 
     await state.update_data(clone_dup_override=True)
@@ -964,4 +1211,17 @@ async def on_clone_duplicate_decision(callback: CallbackQuery, state: FSMContext
     await bump_metric("duplicate_override_save")
     await callback.answer()
     if callback.message:
-        await callback.message.answer(MSG_CLONE_CREATED, reply_markup=MAIN_MENU)
+        restored = await return_to_browser_context(
+            callback.message,
+            state,
+            user_id=callback.from_user.id,  # type: ignore[union-attr]
+            notice_text=MSG_CLONE_CREATED,
+        )
+        if not restored:
+            await state.clear()
+            await callback.message.answer(MSG_CLONE_CREATED, reply_markup=MAIN_MENU)
+
+
+@router.message(BrowserStates.clone_waiting_calendar_date)
+async def clone_waiting_date_manual(message: Message) -> None:
+    await message.answer(MSG_PICK_DATE_WITH_BUTTONS)

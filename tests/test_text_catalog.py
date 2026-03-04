@@ -12,7 +12,7 @@ def test_required_text_constants_exist():
         "MSG_UPDATED",
         "MSG_DELETED",
         "MSG_CREATION_CANCELLED",
-        "MSG_TIME_PARSE_ERROR",
+        "MSG_PICK_TIME_WITH_BUTTONS",
         "MSG_TIME_PAST",
         "MSG_ACTIVITY_LEN",
     ]

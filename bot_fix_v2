@@ -1,0 +1,309 @@
+BOT FIX V2
+
+Document type: UX remediation notes and implementation spec
+Date: 2026-03-04
+Project: reminder_bot
+
+0. Deterministic conventions (mandatory for this document)
+1. "Now/current time" always means `datetime.now(user_timezone)`.
+2. All date/time comparisons are performed in user timezone, not UTC.
+3. Callback/session mismatch is always treated as stale session.
+4. Phase execution gate is strict:
+   next phase starts only after previous phase is fully green (tests + acceptance checks).
+5. If implementation behavior is not explicitly described here, it must not be invented ad hoc:
+   missing rule must be added to this document first.
+6. Legacy policy:
+   old logic must be removed during implementation of each phase; parallel old/new execution paths are forbidden.
+7. Input contract:
+   user enters free text only for activity; date/time are selected only via buttons (no manual date/time parsing).
+
+1. Current UX status
+1. UX is significantly better than legacy version (calendar, browser list, edit/clone/delete/undo exist).
+2. Current practical rating: 7.5/10.
+3. Main remaining friction is not core functionality, but context continuity and predictability of user flow.
+
+2. Confirmed UX issues
+1. Context loss after operations:
+   create/edit/clone flows often end in MAIN_MENU instead of returning user to current browser page/filter.
+2. Weak cancel behavior in duplicate warning:
+   pressing cancel in dup2 flow can leave user without explicit visual return to prior screen.
+3. Manual time parsing is too broad:
+   natural phrases are still accepted in manual mode (for strict UX this is undesirable).
+4. Week filter semantics ambiguity:
+   "Неделя" currently means "now -> Sunday", which may not match user expectation ("7 days" or "Mon-Sun").
+5. Regression risk:
+   current test coverage is strong, but missing explicit tests for context return after mutation actions.
+6. Notes field overload:
+   extra "Заметки/Примечание" step increases friction and is not required by product target.
+
+3. Required UX fixes (implementation order)
+
+PHASE A: Browser context continuity (mandatory)
+1. Preserve browser context for all browser-originated operations:
+   edit, clone, delete, undo.
+2. Store in FSM:
+   return_to_browser=true,
+   browser_sid,
+   browser_filter,
+   browser_page,
+   browser_message_id.
+3. On successful mutation, refresh the same browser message using existing refresh helper.
+4. Do not send user to MAIN_MENU when action was initiated from browser.
+5. If browser message cannot be edited (deleted/not found), send one new browser message and update FSM `browser_message_id`.
+6. If browser context in FSM is missing/corrupted, fallback to MAIN_MENU with explicit error text.
+7. Acceptance:
+   after edit/clone/delete/undo user stays on same filter/page and sees updated list.
+
+PHASE B: Deterministic cancel in duplicate-warning (mandatory)
+1. For all dup2 cancel actions:
+   create flow -> return to create confirmation preview.
+   edit datetime flow -> return to edit field menu.
+   clone flow -> return to clone confirmation preview.
+2. Add explicit message update/answer on cancel; no silent no-op.
+3. Cancel action must never clear flow data needed for immediate return screen.
+4. Acceptance:
+   every cancel produces predictable visible state transition.
+
+PHASE C: Time input redesign without WebApp (mandatory)
+Goal:
+Replace free-form manual time step with inline pseudo-roller in regular Telegram bot UI.
+Manual time text input is fully removed.
+
+1. UI layout (single editable message):
+   [-1ч] [HH] [+1ч]
+   [-5м] [MM] [+5м]
+   [00] [15] [30] [45]
+   [Сейчас+1ч] [Готово] [Отмена]
+
+2. Behavior:
+1. All controls update one message via edit_text/edit_reply_markup.
+2. HH wraps in range 00..23.
+3. MM wraps in range 00..59.
+4. [00][15][30][45] sets minutes directly in current hour.
+5. [Сейчас+1ч] sets candidate time to now+1 hour in user timezone.
+6. [Готово] validates candidate datetime against selected date and user timezone.
+7. If selected datetime <= now, reject with explicit error and keep picker open.
+8. [Отмена] exits picker and returns to previous deterministic screen.
+9. Picker initial value is mandatory:
+   when picker opens, HH:MM is prefilled from current user local time.
+10. Picker reopen rule:
+   each new open of picker within any flow (create/edit/clone) again initializes HH:MM from current user local time.
+11. Existing candidate time is preserved only when user stays on same picker message and presses +/- or preset minute buttons.
+
+3. Callback protocol (recommended):
+1. tmr2:<sid>:h:minus1
+2. tmr2:<sid>:h:plus1
+3. tmr2:<sid>:m:minus5
+4. tmr2:<sid>:m:plus5
+5. tmr2:<sid>:m:set:00|15|30|45
+6. tmr2:<sid>:quick:now_plus_1h
+7. tmr2:<sid>:ok
+8. tmr2:<sid>:cancel
+
+4. FSM data:
+1. time_picker_sid
+2. time_picker_message_id
+3. tp_hour
+4. tp_minute
+5. selected_date_iso
+6. timezone
+7. return_to_browser + browser context keys if launched from browser.
+8. selected_date_iso is mandatory before picker open; if missing -> explicit stale error and flow restart prompt.
+
+5. Integration points:
+1. create flow (wizard)
+2. edit datetime flow (event_edit)
+3. clone datetime flow (task_browser)
+
+6. Manual text policy (mandatory):
+1. Remove natural-language parsing from all time states.
+2. Remove strict HH:MM text fallback from all time states.
+3. Time is selected only via picker buttons and quick-time buttons.
+4. Any text received while waiting for time must return explicit guidance:
+   "Выберите время кнопками."
+5. Date is selected only via calendar buttons.
+6. Any text received while waiting for date must return explicit guidance:
+   "Выберите дату кнопками календаря."
+
+PHASE D: Week filter semantics hardening (mandatory)
+1. Choose one fixed definition and keep it everywhere:
+   Selected and final: next 7 days from current moment (rolling window now..now+7d).
+2. Boundary contract:
+   lower bound inclusive (`>= now`), upper bound inclusive (`<= now+7d`).
+3. Update:
+   filter bounds logic,
+   browser header text,
+   tests for boundaries.
+4. Acceptance:
+   semantics documented and fully deterministic for timezone-aware users.
+
+PHASE E: Coverage and QA hardening (mandatory)
+1. Add tests:
+1. browser-origin action returns to same filter/page.
+2. duplicate cancel returns to expected prior screen (create/edit/clone).
+3. pseudo-roller callbacks mutate HH/MM correctly.
+4. pseudo-roller done validation rejects past datetime.
+5. date/time text input is not parsed and always returns guidance to use buttons.
+6. Keep existing calendar/session ownership tests green.
+7. Keep regression suite for calendar/session/security/undo/duplicate fully green.
+
+2. Test gate:
+1. No phase merge if any test is skipped/xfail without explicit reason in commit message.
+
+3. Manual QA script:
+1. /start new user -> timezone set/cancel paths.
+2. create reminder via calendar + pseudo-roller.
+3. duplicate warning save/cancel.
+4. browser navigation and mutation actions from multiple pages.
+5. undo within 15 minutes and after expiry.
+6. edit datetime/activity from browser.
+7. stale callback and ownership rejection UX messages.
+
+PHASE F: Remove notes/primitives completely (mandatory)
+Goal:
+Leave only one content field: activity. Remove all user-visible and code-level notes dependencies.
+
+1. Product contract:
+1. New reminder contains only:
+   datetime + activity.
+2. Edit menu contains only:
+   datetime + activity.
+3. Browser cards contain only:
+   datetime + activity.
+4. Preview contains only:
+   datetime + activity.
+5. Manual text input is allowed only for activity.
+6. Date/time input is button-only in all flows (create/edit/clone).
+
+2. UX/API removals:
+1. Remove prompts and buttons:
+   "Заметки", "Введите заметки", "Введите новые заметки".
+2. Remove wizard step waiting_notes and all transitions to it.
+3. Remove edit state edit_waiting_notes and callbacks/handlers linked to notes.
+4. Remove notes blocks from all preview texts and list rows.
+
+3. Code removals (mandatory):
+1. Remove use of notes formatting helper from flows:
+   notes_fmt dependency must be removed from active flows.
+2. Remove notes constants from text catalog.
+3. Remove notes branches from:
+   wizard,
+   event_edit,
+   task_browser payload rendering.
+
+4. Data layer policy:
+1. Backward compatibility:
+   keep DB column `events.notes` physically for now (no destructive migration in this phase).
+2. Runtime policy:
+   all create/clone/edit operations must write `notes = NULL`.
+3. Read policy:
+   ignore stored `notes` in UI and business logic.
+4. Optional cleanup phase later:
+   separate migration can drop column after freeze window and backup.
+
+5. Scheduler/security impact:
+1. No change in scheduling logic.
+2. No change in ownership checks.
+3. Duplicate signature remains:
+   user_id + event_dt + normalized activity.
+
+6. Acceptance criteria:
+1. User cannot enter or edit notes anywhere in bot.
+2. All task displays and confirmations do not mention notes.
+3. Create/edit/clone flows complete with activity only.
+4. Existing tests pass + notes-related tests replaced by updated activity-only coverage.
+5. `notes_fmt` import is removed from active handlers.
+6. In date/time states, text input is not parsed and only returns button guidance.
+
+7. Mandatory test updates:
+1. Remove or rewrite tests expecting notes prompt/notes edit.
+2. Add tests:
+   create flow without notes step,
+   edit menu without notes option,
+   preview without notes section,
+   browser item rendering without notes flag,
+   text in date/time states does not parse and returns guidance to use buttons.
+3. Keep regression suite for calendar/session/security/undo/duplicate fully green.
+
+4. Metrics updates (to keep observability complete)
+1. Ensure metric bumps for new picker callbacks:
+   callback_invalid_payload,
+   callback_stale_session,
+   callback_debounce_reject.
+2. Keep existing business metrics:
+   duplicate_warning_shown,
+   duplicate_override_save,
+   undo_success,
+   undo_expired,
+   clone_created,
+   delete_performed,
+   create_success,
+   edit_success.
+3. For removed notes flow:
+   no metrics should depend on notes events; obsolete notes-related counters are forbidden.
+
+PHASE G: Reminder scheduling logic hardening (mandatory)
+Goal:
+Make reminder behavior predictable: no double alerts for near events and no parallel timelines after snooze.
+
+1. Near-event reminder policy:
+1. For events with `event_dt - now <= 60 minutes`:
+   schedule only `at_time`.
+2. `soon` job type is removed from active scheduling logic.
+3. For events with `event_dt - now > 60 minutes`:
+   keep existing rules for `day_before` and `hour_before` if they are in future.
+4. Boundary is strict and deterministic:
+   exactly 60 minutes -> only `at_time`.
+
+2. Snooze policy (reschedule, not additive):
+1. On snooze click:
+   increment snooze counter (limit 25 unchanged),
+   compute `new_dt = now(user_timezone) + 1 hour`.
+2. Persist new datetime into event row:
+   `events.event_dt = new_dt`.
+3. Cancel all currently scheduled jobs for this event.
+4. Rebuild jobs from `new_dt` using standard scheduler path.
+5. Result:
+   one active reminder timeline exists per event at any time.
+
+3. UX implications:
+1. User must not receive two close reminders caused by `soon + at_time`.
+2. After snooze, task time shown in list/preview equals actual next reminder timeline.
+3. Snooze button behavior is interpreted as "перенести событие на +1 час".
+
+4. Data and migration policy:
+1. No schema migration required for this phase.
+2. Existing `jobs` rows for event are replaced through standard cancel/recreate flow.
+3. Existing historical events remain compatible.
+
+5. Acceptance criteria:
+1. Near event created at T-30m receives only one reminder at event time.
+2. Near event created at exactly T-60m receives only one reminder at event time.
+3. After snooze, old `at_time/hour_before/day_before` jobs for the same event are not left active.
+4. Event datetime in DB equals snoozed target time.
+5. Snooze limit (25) behavior remains unchanged.
+
+6. Mandatory tests:
+1. compute_job_times returns only `at_time` for deltas <= 60m.
+2. Snooze flow updates event_dt and recreates jobs without duplicates.
+3. Repeated snooze keeps single active job timeline.
+4. Ownership/security checks in reminder callbacks remain green.
+
+5. Legacy cleanup control (mandatory)
+1. On every phase completion, remove dead code created by migration:
+   old handlers, old states, old callbacks, old text constants, old helper imports.
+2. No duplicate behavior layers:
+   one user action must map to one active code path.
+3. If temporary compatibility wrapper is required, it must have explicit removal checkpoint and deadline in the same phase notes.
+4. A phase is not complete while legacy branch for the same behavior still exists.
+
+6. Final UX target after V2
+1. User completes common flows with minimal context switching.
+2. Every cancel path is explicit and reversible.
+3. Time selection is button-driven and fast on mobile.
+4. Behavior is deterministic across timezone and date boundaries.
+5. No ambiguous state after callbacks.
+6. No notes/primitives in user-facing flows; activity is the single content field.
+7. Time picker always opens at current local time to minimize manual scrolling.
+8. No legacy logic layers remain for replaced UX flows.
+9. Date/time are selected only by buttons; manual parsing is fully removed.

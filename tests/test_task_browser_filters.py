@@ -44,7 +44,7 @@ def test_week_filter_bounds():
     now = datetime(2026, 3, 4, 15, 20, tzinfo=tz)  # Wednesday
     start, end = _bounds_for_filter("week", now)
     assert start.startswith("2026-03-04T15:20:00")
-    assert end.startswith("2026-03-08T23:59:59")
+    assert end.startswith("2026-03-11T15:20:00")
 
 
 @pytest.mark.asyncio
