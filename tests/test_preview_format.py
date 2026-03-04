@@ -11,11 +11,10 @@ def test_preview_contains_absolute_datetime_and_timezone():
     text = format_event_preview(
         dt=dt,
         activity="Тренировка",
-        tz_name="Europe/Moscow",
         mode="create",
     )
     assert "02.07.2026 18:30" in text
-    assert "(Europe/Moscow)" in text
+    assert "(Europe/Moscow)" not in text
     assert "Активность: Тренировка" in text
 
 
@@ -24,8 +23,8 @@ def test_preview_contains_only_datetime_and_activity():
     text = format_event_preview(
         dt=dt,
         activity="Тренировка",
-        tz_name="Europe/Moscow",
         mode="edit",
     )
     assert "Заметки" not in text
+    assert "(Europe/Moscow)" not in text
     assert "Проверьте изменения:" in text

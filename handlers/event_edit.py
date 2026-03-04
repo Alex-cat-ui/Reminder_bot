@@ -26,12 +26,12 @@ from .metrics_utils import bump_metric
 from .start import MAIN_MENU
 from .task_browser import return_to_browser_context
 from .time_picker import (
-    apply_picker_step,
+    apply_picker_action,
     build_time_picker_kb,
     parse_time_picker_callback,
     picker_initial_now,
-    picker_initial_now_plus_1h,
 )
+from .ui_common import format_step_with_tz, format_time_picker_text
 from .texts import (
     MSG_ACTIVITY_LEN,
     MSG_CALENDAR_UPDATE_ERROR,
@@ -51,8 +51,8 @@ from .texts import (
     MSG_STALE_CALENDAR,
     MSG_TIME_PAST,
     MSG_UNAUTHORIZED,
-    MSG_UPDATED,
     MSG_WEEK_EDIT_PROMPT,
+    format_saved_summary,
 )
 
 router = Router()
@@ -94,12 +94,8 @@ def parse_evt_callback(data: str) -> tuple[str, int, str | None] | None:
     return None
 
 
-def _with_tz_line(base: str, tz_name: str) -> str:
-    return f"{base}\nЧасовой пояс: {tz_name}"
-
-
 def _time_picker_text(tz_name: str, hour: int, minute: int) -> str:
-    return f"{_with_tz_line(STEP_EDIT_TIME, tz_name)}\nТекущее значение: {hour:02d}:{minute:02d}"
+    return format_time_picker_text(STEP_EDIT_TIME, tz_name, hour, minute)
 
 
 async def _open_edit_time_picker(
@@ -206,7 +202,7 @@ async def _start_edit_calendar_step(
         edit_selected_date_iso=None,
     )
 
-    step_text = _with_tz_line(STEP_EDIT_DATE, tz_name)
+    step_text = format_step_with_tz(STEP_EDIT_DATE, tz_name)
     await message.answer(step_text, reply_markup=CANCEL_KB)
 
     kb = build_date_calendar_kb(
@@ -500,7 +496,7 @@ async def on_edit_calendar_date(callback: CallbackQuery, state: FSMContext) -> N
             prefix="edtcal2",
             tail_parts=(str(expected_event_id),),
         )
-        text = _with_tz_line(STEP_EDIT_DATE, tz_name)
+        text = format_step_with_tz(STEP_EDIT_DATE, tz_name)
 
         try:
             await callback.message.edit_text(text, reply_markup=kb)
@@ -549,7 +545,7 @@ async def on_edit_calendar_date(callback: CallbackQuery, state: FSMContext) -> N
 
         await callback.answer()
         await callback.message.answer(
-            _with_tz_line(STEP_EDIT_TIME, tz_name),
+            format_step_with_tz(STEP_EDIT_TIME, tz_name),
             reply_markup=build_quick_time_kb(
                 expected_sid,
                 prefix="edtcal2",
@@ -654,11 +650,21 @@ async def on_edit_time_callback(callback: CallbackQuery, state: FSMContext) -> N
             await callback.message.edit_reply_markup(reply_markup=None)
         except TelegramBadRequest:
             pass
+        selected_date = date.fromisoformat(data["edit_selected_date_iso"])
+        new_dt = datetime(
+            selected_date.year,
+            selected_date.month,
+            selected_date.day,
+            hour,
+            minute,
+            tzinfo=ZoneInfo(tz_name),
+        )
+        summary = format_saved_summary(dt=new_dt, activity=event["activity"])
         await _complete_edit_result(
             callback.message,
             state,
             user_id=user_id,
-            text=MSG_UPDATED,
+            text=summary,
         )
 
 
@@ -710,7 +716,7 @@ async def on_edit_time_picker(callback: CallbackQuery, state: FSMContext) -> Non
             await callback.message.answer(MSG_STALE_CALENDAR)
             return
         await callback.message.answer(
-            _with_tz_line(STEP_EDIT_TIME, tz_name),
+            format_step_with_tz(STEP_EDIT_TIME, tz_name),
             reply_markup=build_quick_time_kb(
                 cal_sid,
                 prefix="edtcal2",
@@ -747,20 +753,35 @@ async def on_edit_time_picker(callback: CallbackQuery, state: FSMContext) -> Non
             await callback.message.edit_reply_markup(reply_markup=None)
         except TelegramBadRequest:
             pass
+        event_id = data.get("edit_event_id")
+        summary = None
+        if event_id:
+            updated_event = await database.get_active_event_for_user(
+                int(event_id),
+                callback.from_user.id,  # type: ignore[union-attr]
+            )
+            if updated_event:
+                summary = format_saved_summary(
+                    dt=datetime.fromisoformat(updated_event["event_dt"]),
+                    activity=updated_event["activity"],
+                )
         await _complete_edit_result(
             callback.message,
             state,
             user_id=callback.from_user.id,  # type: ignore[union-attr]
-            text=MSG_UPDATED,
+            text=summary or "Сохранено.",
         )
         return
 
     hour = int(data.get("edit_tp_hour", 0))
     minute = int(data.get("edit_tp_minute", 0))
-    if kind == "quick":
-        hour, minute = picker_initial_now_plus_1h(tz_name)
-    else:
-        hour, minute = apply_picker_step(hour, minute, kind, parsed.get("value"))
+    hour, minute = apply_picker_action(
+        hour,
+        minute,
+        kind,
+        parsed.get("value"),
+        tz_name=tz_name,
+    )
     await state.update_data(edit_tp_hour=hour, edit_tp_minute=minute)
     try:
         await callback.message.edit_text(
@@ -843,11 +864,22 @@ async def on_edit_duplicate_decision(callback: CallbackQuery, state: FSMContext)
     await callback.answer()
     await bump_metric("duplicate_override_save")
     if callback.message:
+        summary = None
+        if event_id:
+            updated_event = await database.get_active_event_for_user(
+                int(event_id),
+                callback.from_user.id,  # type: ignore[union-attr]
+            )
+            if updated_event:
+                summary = format_saved_summary(
+                    dt=datetime.fromisoformat(updated_event["event_dt"]),
+                    activity=updated_event["activity"],
+                )
         await _complete_edit_result(
             callback.message,
             state,
             user_id=callback.from_user.id,  # type: ignore[union-attr]
-            text=MSG_UPDATED,
+            text=summary or "Сохранено.",
         )
 
 
@@ -875,7 +907,11 @@ async def process_edit_activity(message: Message, state: FSMContext) -> None:
     await database.update_event_activity(event_id, text)
     await database.update_event_notes(event_id, None)
     await bump_metric("edit_success")
-    await _complete_edit_result(message, state, user_id=user_id, text=MSG_UPDATED)
+    summary = format_saved_summary(
+        dt=datetime.fromisoformat(event["event_dt"]),
+        activity=text,
+    )
+    await _complete_edit_result(message, state, user_id=user_id, text=summary)
 
 
 @router.message(EditEventStates.edit_menu)

@@ -37,6 +37,22 @@ def apply_picker_step(hour: int, minute: int, action: str, value: str | None = N
     return hour, minute
 
 
+def apply_picker_action(
+    hour: int,
+    minute: int,
+    kind: str,
+    value: str | None,
+    *,
+    tz_name: str,
+) -> tuple[int, int]:
+    """Apply one picker callback action to current HH:MM candidate."""
+    if kind == "quick":
+        return picker_initial_now_plus_1h(tz_name)
+    if kind == "t" and value is not None and len(value) == 4 and value.isdigit():
+        return int(value[:2]), int(value[2:])
+    return apply_picker_step(hour, minute, kind, value)
+
+
 def build_time_picker_kb(sid: str, hour: int, minute: int) -> InlineKeyboardMarkup:
     hh = f"{hour:02d}"
     mm = f"{minute:02d}"
@@ -59,10 +75,16 @@ def build_time_picker_kb(sid: str, hour: int, minute: int) -> InlineKeyboardMark
                 InlineKeyboardButton(text="45", callback_data=f"tmr2:{sid}:m:set:45"),
             ],
             [
+                InlineKeyboardButton(text="09:00", callback_data=f"tmr2:{sid}:t:set:0900"),
+                InlineKeyboardButton(text="12:00", callback_data=f"tmr2:{sid}:t:set:1200"),
+                InlineKeyboardButton(text="18:00", callback_data=f"tmr2:{sid}:t:set:1800"),
+                InlineKeyboardButton(text="20:00", callback_data=f"tmr2:{sid}:t:set:2000"),
+            ],
+            [
                 InlineKeyboardButton(text="Сейчас+1ч", callback_data=f"tmr2:{sid}:quick:now_plus_1h"),
                 InlineKeyboardButton(text="Готово", callback_data=f"tmr2:{sid}:ok"),
-                InlineKeyboardButton(text="Отмена", callback_data=f"tmr2:{sid}:cancel"),
             ],
+            [InlineKeyboardButton(text="Отмена", callback_data=f"tmr2:{sid}:cancel")],
         ]
     )
 
@@ -91,5 +113,8 @@ def parse_time_picker_callback(data: str) -> tuple[str, dict] | None:
 
     if tag == "quick" and len(parts) == 4 and parts[3] == "now_plus_1h":
         return "quick", {"sid": sid, "value": parts[3]}
+
+    if tag == "t" and len(parts) == 5 and parts[3] == "set" and parts[4] in {"0900", "1200", "1800", "2000"}:
+        return "t", {"sid": sid, "value": parts[4]}
 
     return None

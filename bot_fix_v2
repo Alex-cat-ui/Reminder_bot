@@ -289,6 +289,113 @@ Make reminder behavior predictable: no double alerts for near events and no para
 3. Repeated snooze keeps single active job timeline.
 4. Ownership/security checks in reminder callbacks remain green.
 
+PHASE H: Visual consistency and timezone label cleanup (mandatory)
+Goal:
+Improve chat UX readability without WebApp and remove timezone in parenthesis format from all user-facing texts.
+
+1. Timezone rendering contract (hard requirement):
+1. String format `(<IANA timezone>)` is forbidden in all user-visible texts.
+2. Date/time line must be plain:
+   `Когда: DD.MM.YYYY HH:MM`
+3. Timezone, if needed on a screen, is shown only as separate line:
+   `Часовой пояс: Europe/Moscow`
+4. No mixed format in one message (forbidden: both inline parenthesis and separate line).
+
+2. Message template contract:
+1. All wizard/edit/clone step screens use one template:
+   `<Раздел> | Шаг X/Y`
+   `Часовой пояс: <tz>`
+   empty line
+   `<короткая инструкция>`
+2. Confirmation/preview screens are concise:
+   `Когда: ...`
+   `Активность: ...`
+3. Browser list item is concise:
+   `N. DD.MM.YYYY HH:MM`
+   `Активность: ...`
+   no timezone in parenthesis.
+
+3. Keyboard layout contract:
+1. `Отмена` is always the last row.
+2. `Готово` is always in action row immediately above `Отмена`.
+3. Dangerous actions (`Удалить`) are isolated in separate row from non-dangerous actions.
+4. For time picker:
+   keep current pseudo-roller rows,
+   add quick presets row `09:00 12:00 18:00 20:00` under minute presets.
+
+4. Error microcopy contract:
+1. Every validation error must include explicit next action.
+2. Mandatory wording for past-time error:
+   `Это время уже прошло. Выберите более позднее время кнопками.`
+3. Stale/session errors in date-time flows must include restart action hint.
+
+5. Noise reduction contract:
+1. During same step, message is updated via `edit_text` / `edit_reply_markup` where possible.
+2. Old inline keyboard is always removed after successful transition.
+3. New messages are allowed only for explicit new screen or fallback recovery.
+
+6. Final success message contract:
+1. After create/edit/clone success, send short summary:
+   `Сохранено: DD.MM.YYYY HH:MM`
+   `Активность: ...`
+2. No timezone in parenthesis in this summary.
+
+7. Mandatory tests for Phase H:
+1. Preview formatter does not contain `(` + timezone + `)` pattern.
+2. Browser payload text does not contain timezone parenthesis.
+3. Time picker keyboard contains preset row `09:00 12:00 18:00 20:00`.
+4. Dangerous actions placement tests verify dedicated row for `Удалить`.
+5. Error text tests verify actionable hint.
+
+8. Acceptance criteria:
+1. No user-visible string in bot contains `(<IANA timezone>)`.
+2. UX text style is consistent across create/edit/clone flows.
+3. Keyboard placement rules are deterministic and respected in all relevant screens.
+4. Full test suite green.
+
+PHASE I: De-duplication and anti-layering refactor (mandatory)
+Goal:
+Remove duplicated logic introduced by phased migration and ensure one behavior = one code path.
+
+1. Confirmed duplication hotspots (must be addressed):
+1. `_with_tz_line` exists in multiple handlers (`wizard`, `event_edit`, `task_browser`).
+2. Time-picker flow logic (`tmr2` parse, stale/session checks, cancel/ok branches) duplicated across create/edit/clone.
+3. Repeated quick-time transition logic duplicated in create/edit/clone.
+4. Repeated preview-assembly and finalize-success message branches duplicated in multiple callbacks.
+5. Hardcoded step texts duplicated in `task_browser` clone flow.
+
+2. Refactor target architecture:
+1. Introduce shared helper module for step text formatting and timezone line composition.
+2. Introduce shared time-picker controller helpers:
+   session validation,
+   candidate HH/MM mutation,
+   common cancel/ok action skeleton.
+3. Introduce shared preview/success formatter wrappers used by create/edit/clone.
+4. Replace hardcoded inline texts with catalog constants in `handlers/texts.py`.
+5. Remove obsolete helper branches left after migration.
+
+3. Anti-layering rules:
+1. No parallel old/new handlers for same callback prefix.
+2. No duplicated state names for same user step semantics across modules unless technically required.
+3. If behavior differs by flow, difference must be explicit parameter, not copied function body.
+
+4. Safety constraints:
+1. Public callback protocol and FSM keys remain backward-compatible within V2 baseline unless explicitly versioned.
+2. Security checks (ownership, stale session, debounce) must stay intact.
+3. No regression in browser context restore and undo flows.
+
+5. Mandatory tests for Phase I:
+1. Existing behavior tests stay green unchanged.
+2. Add focused tests for shared helper behavior (unit-level).
+3. Add snapshot-like text tests for key screens after constant centralization.
+4. Add tests verifying identical stale/debounce handling across create/edit/clone picker flows.
+
+6. Acceptance criteria:
+1. Duplicated helper implementations removed from handlers (single source of truth).
+2. No dead branches and no temporary compatibility wrappers left.
+3. Code size in touched handlers decreases or stays flat with clearer separation.
+4. Full test suite green.
+
 5. Legacy cleanup control (mandatory)
 1. On every phase completion, remove dead code created by migration:
    old handlers, old states, old callbacks, old text constants, old helper imports.
@@ -307,3 +414,4 @@ Make reminder behavior predictable: no double alerts for near events and no para
 7. Time picker always opens at current local time to minimize manual scrolling.
 8. No legacy logic layers remain for replaced UX flows.
 9. Date/time are selected only by buttons; manual parsing is fully removed.
+10. User-visible timezone is never shown in parenthesis form.

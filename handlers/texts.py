@@ -18,7 +18,7 @@ MSG_WHAT_TO_EDIT = "Что изменить?"
 MSG_SELECT_EDIT_FIELD = "Выберите, что изменить:"
 
 MSG_INVALID_ACTION = "Некорректное действие."
-MSG_STALE_CALENDAR = "Календарь устарел. Начните заново."
+MSG_STALE_CALENDAR = "Календарь устарел. Начните заново с выбора даты."
 MSG_INVALID_DATE = "Некорректная дата."
 MSG_DEBOUNCE = "Слишком часто. Нажмите еще раз."
 MSG_CALENDAR_UPDATED = "Календарь обновлен."
@@ -35,15 +35,16 @@ MSG_CALENDAR_STEP = "Шаг 1/4. Выберите дату в календаре
 MSG_TIME_STEP = "Шаг 2/4. Выберите время кнопками."
 MSG_EDIT_CALENDAR_STEP = "Шаг 1/2. Выберите новую дату в календаре."
 MSG_EDIT_TIME_STEP = "Шаг 2/2. Выберите новое время кнопками."
+MSG_CLONE_CALENDAR_STEP = "Шаг 1/2. Выберите новую дату в календаре."
+MSG_CLONE_TIME_STEP = "Шаг 2/2. Выберите новое время кнопками."
 MSG_ENTER_NEW_ACTIVITY = "Введите новую активность (1-200 символов):"
-MSG_TIME_PAST = "Это время уже прошло для выбранной даты. Введите более позднее время."
+MSG_TIME_PAST = "Это время уже прошло. Выберите более позднее время кнопками."
 
 MSG_WEEK_EMPTY = "На этой неделе нет активных напоминаний."
 MSG_WEEK_EDIT_PROMPT = "Выберите, что изменить:"
 MSG_BROWSER_CLOSED = "Список закрыт."
 MSG_BROWSER_EMPTY = "Список пуст."
 MSG_BROWSER_CONTEXT_LOST = "Контекст списка потерян. Возврат в главное меню."
-MSG_CLONE_CREATED = "Копия задачи создана."
 
 MSG_SNOOZE_LIMIT = "Лимит откладываний достигнут (25)."
 MSG_DONE = "✅ Завершено"
@@ -58,14 +59,19 @@ def format_event_preview(
     *,
     dt: datetime,
     activity: str,
-    tz_name: str,
     mode: str = "create",
 ) -> str:
-    """Unified preview text with explicit timezone."""
+    """Unified concise preview text."""
     header = "Проверьте напоминание:" if mode == "create" else "Проверьте изменения:"
     dt_str = dt.strftime("%d.%m.%Y %H:%M")
     return (
         f"{header}\n\n"
-        f"Когда: {dt_str} ({tz_name})\n"
+        f"Когда: {dt_str}\n"
         f"Активность: {activity}"
     )
+
+
+def format_saved_summary(*, dt: datetime, activity: str) -> str:
+    """Short success summary shown after save/update/clone."""
+    dt_str = dt.strftime("%d.%m.%Y %H:%M")
+    return f"Сохранено: {dt_str}\nАктивность: {activity}"

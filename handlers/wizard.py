@@ -32,19 +32,18 @@ from .duplicates import has_duplicate_event
 from .metrics_utils import bump_metric
 from .start import MAIN_MENU
 from .time_picker import (
-    apply_picker_step,
+    apply_picker_action,
     build_time_picker_kb,
     parse_time_picker_callback,
     picker_initial_now,
-    picker_initial_now_plus_1h,
 )
+from .ui_common import format_step_with_tz, format_time_picker_text
 from .texts import (
     MSG_ACTIVITY_LEN,
     MSG_CALENDAR_STEP,
     MSG_CALENDAR_UPDATE_ERROR,
     MSG_CALENDAR_UPDATED,
     MSG_CONFIRM_FALLBACK,
-    MSG_CREATED,
     MSG_CREATION_CANCELLED,
     MSG_DEBOUNCE,
     MSG_DUPLICATE_WARNING,
@@ -61,6 +60,7 @@ from .texts import (
     MSG_TIME_STEP,
     MSG_WHAT_TO_EDIT,
     format_event_preview,
+    format_saved_summary,
 )
 
 router = Router()
@@ -81,11 +81,6 @@ CANCEL_KB = ReplyKeyboardMarkup(
 
 STEP_DATE = MSG_CALENDAR_STEP
 STEP_TIME = MSG_TIME_STEP
-
-
-def _with_tz_line(base: str, tz_name: str) -> str:
-    return f"{base}\nЧасовой пояс: {tz_name}"
-
 
 def _calendar_bounds(tz_name: str) -> tuple[date, date]:
     tz = ZoneInfo(tz_name)
@@ -130,10 +125,7 @@ def _parse_duplicate_callback(data: str) -> tuple[str, str] | None:
 
 
 def _time_picker_text(tz_name: str, hour: int, minute: int) -> str:
-    return (
-        f"{_with_tz_line(STEP_TIME, tz_name)}\n"
-        f"Текущее значение: {hour:02d}:{minute:02d}"
-    )
+    return format_time_picker_text(STEP_TIME, tz_name, hour, minute)
 
 
 async def _open_create_time_picker(
@@ -169,7 +161,7 @@ async def _start_calendar_step(message: Message, state: FSMContext, tz_name: str
         selected_date_iso=None,
     )
 
-    step_text = _with_tz_line(STEP_DATE, tz_name)
+    step_text = format_step_with_tz(STEP_DATE, tz_name)
     await message.answer(step_text, reply_markup=CANCEL_KB)
     kb = build_date_calendar_kb(
         sid,
@@ -316,7 +308,7 @@ async def on_calendar_date(callback: CallbackQuery, state: FSMContext) -> None:
             today_date=today,
             prefix="cal2",
         )
-        text = _with_tz_line(STEP_DATE, tz_name)
+        text = format_step_with_tz(STEP_DATE, tz_name)
 
         try:
             await callback.message.edit_text(text, reply_markup=kb)
@@ -365,7 +357,7 @@ async def on_calendar_date(callback: CallbackQuery, state: FSMContext) -> None:
 
         await callback.answer()
         await callback.message.answer(
-            _with_tz_line(STEP_TIME, tz_name),
+            format_step_with_tz(STEP_TIME, tz_name),
             reply_markup=build_quick_time_kb(expected_sid, prefix="cal2"),
         )
         return
@@ -496,7 +488,7 @@ async def on_create_time_picker(callback: CallbackQuery, state: FSMContext) -> N
             await callback.message.answer(MSG_STALE_CALENDAR)
             return
         await callback.message.answer(
-            _with_tz_line(STEP_TIME, tz_name),
+            format_step_with_tz(STEP_TIME, tz_name),
             reply_markup=build_quick_time_kb(cal_sid, prefix="cal2"),
         )
         return
@@ -519,10 +511,13 @@ async def on_create_time_picker(callback: CallbackQuery, state: FSMContext) -> N
 
     hour = int(data.get("tp_hour", 0))
     minute = int(data.get("tp_minute", 0))
-    if kind == "quick":
-        hour, minute = picker_initial_now_plus_1h(tz_name)
-    else:
-        hour, minute = apply_picker_step(hour, minute, kind, parsed.get("value"))
+    hour, minute = apply_picker_action(
+        hour,
+        minute,
+        kind,
+        parsed.get("value"),
+        tz_name=tz_name,
+    )
 
     await state.update_data(tp_hour=hour, tp_minute=minute)
     try:
@@ -560,11 +555,9 @@ async def process_activity(message: Message, state: FSMContext) -> None:
 
 async def _show_confirmation(message: Message, data: dict) -> None:
     dt = datetime.fromisoformat(data["event_dt"])
-    tz_name = data.get("timezone", "")
     text = format_event_preview(
         dt=dt,
         activity=data["activity"],
-        tz_name=tz_name,
         mode="create",
     )
     kb = ReplyKeyboardMarkup(
@@ -581,6 +574,7 @@ async def _show_confirmation(message: Message, data: dict) -> None:
 @router.message(WizardStates.confirm, F.text == "Подтвердить")
 async def confirm_event(message: Message, state: FSMContext) -> None:
     user_id = message.from_user.id  # type: ignore[union-attr]
+    data_before = await state.get_data()
     ok, error = await _finalize_create(state, user_id=user_id, duplicate_override=False)
     if not ok and error == "DUPLICATE":
         data = await state.get_data()
@@ -595,7 +589,11 @@ async def confirm_event(message: Message, state: FSMContext) -> None:
         await message.answer(error or MSG_INVALID_ACTION)
         return
 
-    await message.answer(MSG_CREATED, reply_markup=MAIN_MENU)
+    summary = format_saved_summary(
+        dt=datetime.fromisoformat(data_before["event_dt"]),
+        activity=data_before["activity"],
+    )
+    await message.answer(summary, reply_markup=MAIN_MENU)
 
 
 async def _finalize_create(
@@ -658,6 +656,7 @@ async def on_create_duplicate_decision(callback: CallbackQuery, state: FSMContex
             await _show_confirmation(callback.message, data)
         return
 
+    data_before = await state.get_data()
     ok, error = await _finalize_create(
         state,
         user_id=callback.from_user.id,  # type: ignore[union-attr]
@@ -670,7 +669,11 @@ async def on_create_duplicate_decision(callback: CallbackQuery, state: FSMContex
     await bump_metric("duplicate_override_save")
     await callback.answer()
     if callback.message:
-        await callback.message.answer(MSG_CREATED, reply_markup=MAIN_MENU)
+        summary = format_saved_summary(
+            dt=datetime.fromisoformat(data_before["event_dt"]),
+            activity=data_before["activity"],
+        )
+        await callback.message.answer(summary, reply_markup=MAIN_MENU)
 
 
 @router.message(WizardStates.confirm, F.text == "Изменить")
