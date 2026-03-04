@@ -33,6 +33,12 @@ from .calendar_core import (
     parse_calendar_callback_with_event,
 )
 from .duplicates import has_duplicate_event
+from .flow_common import (
+    build_duplicate_warning_kb,
+    calendar_bounds,
+    parse_duplicate_callback,
+    quick_date,
+)
 from .metrics_utils import bump_metric
 from .start import MAIN_MENU
 from .time_picker import (
@@ -582,36 +588,11 @@ async def on_undo_callback(callback: CallbackQuery, state: FSMContext | None = N
 
 # ---------- Clone flow ----------
 
-def _clone_quick_date(value: str, today: date) -> date | None:
-    if value == "today":
-        return today
-    if value == "tomorrow":
-        return today + timedelta(days=1)
-    if value == "plus7":
-        return today + timedelta(days=7)
-    return None
-
-
-def _clone_bounds(tz_name: str) -> tuple[date, date]:
-    tz = ZoneInfo(tz_name)
-    today = datetime.now(tz).date()
-    return today, today + timedelta(days=730)
-
-
 def _clone_confirm_kb(sid: str, source_event_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Создать копию", callback_data=f"cln2:{sid}:confirm:{source_event_id}")],
             [InlineKeyboardButton(text="Отмена", callback_data=f"cln2:{sid}:cancel_confirm:{source_event_id}")],
-        ]
-    )
-
-
-def _duplicate_warning_kb(sid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Сохранить", callback_data=f"dup2:{sid}:save")],
-            [InlineKeyboardButton(text="Отмена", callback_data=f"dup2:{sid}:cancel")],
         ]
     )
 
@@ -624,7 +605,7 @@ async def _start_clone_calendar_step(
     source_event: dict,
     tz_name: str,
 ) -> None:
-    today, max_date = _clone_bounds(tz_name)
+    today, max_date = calendar_bounds(tz_name)
     sid = new_calendar_session_id()
 
     await state.set_state(BrowserStates.clone_waiting_calendar_date)
@@ -800,7 +781,7 @@ async def on_clone_calendar(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(MSG_INVALID_ACTION)
         return
 
-    today, max_date = _clone_bounds(tz_name)
+    today, max_date = calendar_bounds(tz_name)
 
     if kind == "nav":
         if callback.message.message_id != data.get("clone_message_id"):
@@ -854,7 +835,7 @@ async def on_clone_calendar(callback: CallbackQuery, state: FSMContext) -> None:
         if kind == "day":
             selected = parsed["date"]
         else:
-            selected = _clone_quick_date(parsed["value"], today)
+            selected = quick_date(parsed["value"], today)
             if selected is None:
                 await callback.answer(MSG_INVALID_ACTION)
                 return
@@ -1141,7 +1122,7 @@ async def on_clone_confirm(callback: CallbackQuery, state: FSMContext) -> None:
         if callback.message:
             await callback.message.answer(
                 MSG_DUPLICATE_WARNING,
-                reply_markup=_duplicate_warning_kb(data["clone_dup_sid"]),
+                reply_markup=build_duplicate_warning_kb(data["clone_dup_sid"]),
             )
         return
 
@@ -1168,13 +1149,13 @@ async def on_clone_confirm(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(BrowserStates.clone_confirm, F.data.startswith("dup2:"))
 async def on_clone_duplicate_decision(callback: CallbackQuery, state: FSMContext) -> None:
-    parts = (callback.data or "").split(":")
-    if len(parts) != 3 or parts[0] != "dup2" or parts[2] not in {"save", "cancel"}:
+    parsed = parse_duplicate_callback(callback.data or "")
+    if parsed is None:
         await bump_metric("callback_invalid_payload")
         await callback.answer(MSG_INVALID_ACTION)
         return
 
-    dup_sid = parts[1]
+    dup_sid, action = parsed
     data = await state.get_data()
     expected = data.get("clone_dup_sid")
     if not expected or expected != dup_sid:
@@ -1182,7 +1163,7 @@ async def on_clone_duplicate_decision(callback: CallbackQuery, state: FSMContext
         await callback.answer(MSG_STALE_CALENDAR)
         return
 
-    if parts[2] == "cancel":
+    if action == "cancel":
         await callback.answer()
         if callback.message:
             dt_iso = data.get("clone_event_dt_iso")

@@ -2,21 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (
-    CallbackQuery,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    Message,
-    ReplyKeyboardMarkup,
-)
+from aiogram.types import CallbackQuery, KeyboardButton, Message, ReplyKeyboardMarkup
 
 import db as database
 from scheduler import schedule_event_jobs
@@ -29,6 +22,12 @@ from .calendar_core import (
     parse_calendar_callback,
 )
 from .duplicates import has_duplicate_event
+from .flow_common import (
+    build_duplicate_warning_kb,
+    calendar_bounds,
+    parse_duplicate_callback,
+    quick_date,
+)
 from .metrics_utils import bump_metric
 from .start import MAIN_MENU
 from .time_picker import (
@@ -82,21 +81,6 @@ CANCEL_KB = ReplyKeyboardMarkup(
 STEP_DATE = MSG_CALENDAR_STEP
 STEP_TIME = MSG_TIME_STEP
 
-def _calendar_bounds(tz_name: str) -> tuple[date, date]:
-    tz = ZoneInfo(tz_name)
-    today = datetime.now(tz).date()
-    return today, today + timedelta(days=730)
-
-
-def _quick_date(value: str, today: date) -> date | None:
-    if value == "today":
-        return today
-    if value == "tomorrow":
-        return today + timedelta(days=1)
-    if value == "plus7":
-        return today + timedelta(days=7)
-    return None
-
 
 def _selected_date_from_data(data: dict) -> date | None:
     selected_iso = data.get("selected_date_iso")
@@ -106,22 +90,6 @@ def _selected_date_from_data(data: dict) -> date | None:
         return date.fromisoformat(selected_iso)
     except ValueError:
         return None
-
-
-def _create_duplicate_warning_kb(sid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Сохранить", callback_data=f"dup2:{sid}:save")],
-            [InlineKeyboardButton(text="Отмена", callback_data=f"dup2:{sid}:cancel")],
-        ]
-    )
-
-
-def _parse_duplicate_callback(data: str) -> tuple[str, str] | None:
-    parts = data.split(":")
-    if len(parts) != 3 or parts[0] != "dup2" or parts[2] not in {"save", "cancel"}:
-        return None
-    return parts[1], parts[2]
 
 
 def _time_picker_text(tz_name: str, hour: int, minute: int) -> str:
@@ -149,7 +117,7 @@ async def _open_create_time_picker(
 
 
 async def _start_calendar_step(message: Message, state: FSMContext, tz_name: str) -> None:
-    today, max_date = _calendar_bounds(tz_name)
+    today, max_date = calendar_bounds(tz_name)
     sid = new_calendar_session_id()
 
     await state.set_state(WizardStates.waiting_calendar_date)
@@ -280,7 +248,7 @@ async def on_calendar_date(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer(MSG_INVALID_ACTION)
         return
 
-    today, max_date = _calendar_bounds(tz_name)
+    today, max_date = calendar_bounds(tz_name)
 
     if kind == "nav":
         if callback.message.message_id != data.get("cal_message_id"):
@@ -337,7 +305,7 @@ async def on_calendar_date(callback: CallbackQuery, state: FSMContext) -> None:
         if kind == "day":
             selected = parsed["date"]
         else:
-            quick = _quick_date(parsed["value"], today)
+            quick = quick_date(parsed["value"], today)
             if quick is None:
                 await callback.answer(MSG_INVALID_ACTION)
                 return
@@ -581,7 +549,7 @@ async def confirm_event(message: Message, state: FSMContext) -> None:
         await bump_metric("duplicate_warning_shown")
         await message.answer(
             MSG_DUPLICATE_WARNING,
-            reply_markup=_create_duplicate_warning_kb(data["create_dup_sid"]),
+            reply_markup=build_duplicate_warning_kb(data["create_dup_sid"]),
         )
         return
 
@@ -634,7 +602,7 @@ async def _finalize_create(
 
 @router.callback_query(WizardStates.confirm, F.data.startswith("dup2:"))
 async def on_create_duplicate_decision(callback: CallbackQuery, state: FSMContext) -> None:
-    parsed = _parse_duplicate_callback(callback.data or "")
+    parsed = parse_duplicate_callback(callback.data or "")
     if parsed is None:
         await bump_metric("callback_invalid_payload")
         await callback.answer(MSG_INVALID_ACTION)

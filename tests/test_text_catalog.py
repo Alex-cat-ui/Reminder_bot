@@ -8,8 +8,6 @@ def test_required_text_constants_exist():
         "MSG_UNAUTHORIZED",
         "MSG_INVALID_ACTION",
         "MSG_STALE_CALENDAR",
-        "MSG_CREATED",
-        "MSG_UPDATED",
         "MSG_DELETED",
         "MSG_CREATION_CANCELLED",
         "MSG_PICK_TIME_WITH_BUTTONS",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
@@ -22,6 +22,12 @@ from .calendar_core import (
     parse_calendar_callback_with_event,
 )
 from .duplicates import has_duplicate_event
+from .flow_common import (
+    build_duplicate_warning_kb,
+    calendar_bounds,
+    parse_duplicate_callback,
+    quick_date,
+)
 from .metrics_utils import bump_metric
 from .start import MAIN_MENU
 from .task_browser import return_to_browser_context
@@ -118,22 +124,6 @@ async def _open_edit_time_picker(
     await state.update_data(edit_tp_message_id=sent.message_id)
 
 
-def _calendar_bounds(tz_name: str) -> tuple[date, date]:
-    tz = ZoneInfo(tz_name)
-    today = datetime.now(tz).date()
-    return today, today + timedelta(days=730)
-
-
-def _quick_date(value: str, today: date) -> date | None:
-    if value == "today":
-        return today
-    if value == "tomorrow":
-        return today + timedelta(days=1)
-    if value == "plus7":
-        return today + timedelta(days=7)
-    return None
-
-
 async def _get_user_tz_name(user_id: int) -> str | None:
     user = await database.get_user(user_id)
     if not user:
@@ -189,7 +179,7 @@ async def _start_edit_calendar_step(
     event_id: int,
     tz_name: str,
 ) -> None:
-    today, max_date = _calendar_bounds(tz_name)
+    today, max_date = calendar_bounds(tz_name)
     sid = new_calendar_session_id()
 
     await state.set_state(EditEventStates.edit_waiting_calendar_date)
@@ -467,7 +457,7 @@ async def on_edit_calendar_date(callback: CallbackQuery, state: FSMContext) -> N
         await callback.answer(MSG_INVALID_ACTION)
         return
 
-    today, max_date = _calendar_bounds(tz_name)
+    today, max_date = calendar_bounds(tz_name)
 
     if kind == "nav":
         if callback.message.message_id != data.get("edit_cal_message_id"):
@@ -525,7 +515,7 @@ async def on_edit_calendar_date(callback: CallbackQuery, state: FSMContext) -> N
         if kind == "day":
             selected = parsed["date"]
         else:
-            quick = _quick_date(parsed["value"], today)
+            quick = quick_date(parsed["value"], today)
             if quick is None:
                 await callback.answer(MSG_INVALID_ACTION)
                 return
@@ -638,7 +628,7 @@ async def on_edit_time_callback(callback: CallbackQuery, state: FSMContext) -> N
                 await bump_metric("duplicate_warning_shown")
                 await callback.message.answer(
                     MSG_DUPLICATE_WARNING,
-                    reply_markup=_duplicate_warning_kb(data["edit_dup_sid"]),
+                    reply_markup=build_duplicate_warning_kb(data["edit_dup_sid"]),
                 )
                 return
             await callback.message.answer(error or MSG_INVALID_ACTION)
@@ -741,7 +731,7 @@ async def on_edit_time_picker(callback: CallbackQuery, state: FSMContext) -> Non
                 await callback.answer()
                 await callback.message.answer(
                     MSG_DUPLICATE_WARNING,
-                    reply_markup=_duplicate_warning_kb(data["edit_dup_sid"]),
+                    reply_markup=build_duplicate_warning_kb(data["edit_dup_sid"]),
                 )
                 return
             await callback.answer()
@@ -803,25 +793,9 @@ async def process_edit_time_manual(message: Message, state: FSMContext) -> None:
     await message.answer(MSG_PICK_TIME_WITH_BUTTONS)
 
 
-def _duplicate_warning_kb(sid: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="Сохранить", callback_data=f"dup2:{sid}:save")],
-            [InlineKeyboardButton(text="Отмена", callback_data=f"dup2:{sid}:cancel")],
-        ]
-    )
-
-
-def _parse_duplicate_callback(data: str) -> tuple[str, str] | None:
-    parts = data.split(":")
-    if len(parts) != 3 or parts[0] != "dup2" or parts[2] not in {"save", "cancel"}:
-        return None
-    return parts[1], parts[2]
-
-
 @router.callback_query(EditEventStates.edit_confirm_duplicate, F.data.startswith("dup2:"))
 async def on_edit_duplicate_decision(callback: CallbackQuery, state: FSMContext) -> None:
-    parsed = _parse_duplicate_callback(callback.data or "")
+    parsed = parse_duplicate_callback(callback.data or "")
     if parsed is None:
         await bump_metric("callback_invalid_payload")
         await callback.answer(MSG_INVALID_ACTION)

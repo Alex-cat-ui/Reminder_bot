@@ -12,8 +12,6 @@ MSG_TZ_CANCELLED = "Выбор часового пояса отменен."
 
 MSG_CREATION_CANCELLED = "Создание напоминания отменено."
 MSG_EDIT_CANCELLED = "Редактирование отменено."
-MSG_CREATED = "Напоминание создано."
-MSG_UPDATED = "Задача обновлена."
 MSG_WHAT_TO_EDIT = "Что изменить?"
 MSG_SELECT_EDIT_FIELD = "Выберите, что изменить:"
 

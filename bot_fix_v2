@@ -396,6 +396,32 @@ Remove duplicated logic introduced by phased migration and ensure one behavior =
 3. Code size in touched handlers decreases or stays flat with clearer separation.
 4. Full test suite green.
 
+PHASE J: Legacy tail removal and final dedup cleanup (mandatory)
+Goal:
+Remove runtime-dead modules and remaining duplicated helper blocks after Phase I.
+
+1. Shared helper consolidation (must):
+1. Move duplicate quick-date/bounds logic to one helper module and reuse from create/edit/clone flows.
+2. Move duplicate `dup2` callback parse + warning keyboard build to one helper module.
+3. Remove local duplicated implementations from handlers after migration.
+
+2. Legacy runtime cleanup (must):
+1. Remove date parser module no longer used by runtime button-only contract.
+2. Remove notes formatting module no longer used by activity-only contract.
+3. Remove unused text constants retained only by historical tests.
+4. Remove non-runtime helper + tests not used in current production path.
+
+3. Test suite alignment (must):
+1. Remove legacy-only tests tied exclusively to deleted runtime modules.
+2. Keep security/session/browser/scheduler regression suites green.
+3. Add/keep tests for shared helpers introduced by dedup refactor.
+
+4. Acceptance criteria:
+1. No imports of deleted legacy modules remain in runtime code.
+2. No duplicated quick-date/bounds or `dup2` parse/kb helpers remain across handlers.
+3. Full test suite green without xfail/skip additions.
+4. `requirements.txt` contains only runtime dependencies.
+
 5. Legacy cleanup control (mandatory)
 1. On every phase completion, remove dead code created by migration:
    old handlers, old states, old callbacks, old text constants, old helper imports.
