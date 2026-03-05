@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 import db as database
 from .start import MAIN_MENU
 from .texts import MSG_BAD_TZ, MSG_TZ_CANCELLED, MSG_TZ_SET
+from .ui_tokens import is_cancel_text
 
 router = Router()
 
@@ -53,7 +54,7 @@ async def cmd_tz(message: Message, state: FSMContext) -> None:
 
 @router.message(TZStates.waiting_tz)
 async def process_tz(message: Message, state: FSMContext) -> None:
-    if (message.text or "").strip() == "Отмена":
+    if is_cancel_text(message.text):
         await state.clear()
         await message.answer(MSG_TZ_CANCELLED, reply_markup=MAIN_MENU)
         return

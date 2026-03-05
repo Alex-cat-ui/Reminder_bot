@@ -46,3 +46,23 @@ async def test_timezone_cancel_returns_to_main_menu(monkeypatch):
     assert called["upsert"] is False
     assert msg.sent
     assert msg.sent[-1][0] == "Выбор часового пояса отменен."
+
+
+@pytest.mark.asyncio
+async def test_timezone_legacy_cancel_with_marker_is_supported(monkeypatch):
+    msg = _FakeMessage("🟥 Отмена", 111)
+    state = _FakeState()
+
+    called = {"upsert": False}
+
+    async def _upsert(*args, **kwargs):
+        called["upsert"] = True
+
+    monkeypatch.setattr(tz_mod.database, "upsert_user", _upsert)
+
+    await tz_mod.process_tz(msg, state)
+
+    assert state.cleared is True
+    assert called["upsert"] is False
+    assert msg.sent
+    assert msg.sent[-1][0] == "Выбор часового пояса отменен."

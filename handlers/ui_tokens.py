@@ -9,7 +9,7 @@ STYLE_DANGER = "danger"
 STYLE_SUCCESS = "success"
 STYLE_PRIMARY = "primary"
 
-CANCEL_TEXTS = frozenset({"Отмена"})
+CANCEL_TEXTS = frozenset({"Отмена", "🟥 Отмена", "🔴 Отмена"})
 
 
 def is_cancel_text(value: str | None) -> bool:

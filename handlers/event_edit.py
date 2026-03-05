@@ -40,7 +40,7 @@ from .time_picker import (
     picker_initial_now,
 )
 from .ui_common import format_step_with_tz, format_time_picker_text
-from .ui_tokens import CANCEL_TEXT, STYLE_DANGER
+from .ui_tokens import CANCEL_TEXT, STYLE_DANGER, is_cancel_text
 from .texts import (
     MSG_ACTIVITY_LEN,
     MSG_CALENDAR_UPDATE_ERROR,
@@ -297,11 +297,11 @@ async def _complete_edit_result(
         await message.answer(text, reply_markup=MAIN_MENU)
 
 
-@router.message(EditEventStates.edit_menu, F.text == "Отмена")
-@router.message(EditEventStates.edit_waiting_calendar_date, F.text == "Отмена")
-@router.message(EditEventStates.edit_waiting_time, F.text == "Отмена")
-@router.message(EditEventStates.edit_confirm_duplicate, F.text == "Отмена")
-@router.message(EditEventStates.edit_waiting_activity, F.text == "Отмена")
+@router.message(EditEventStates.edit_menu, F.text.func(is_cancel_text))
+@router.message(EditEventStates.edit_waiting_calendar_date, F.text.func(is_cancel_text))
+@router.message(EditEventStates.edit_waiting_time, F.text.func(is_cancel_text))
+@router.message(EditEventStates.edit_confirm_duplicate, F.text.func(is_cancel_text))
+@router.message(EditEventStates.edit_waiting_activity, F.text.func(is_cancel_text))
 async def cancel_edit_by_text(message: Message, state: FSMContext) -> None:
     await _complete_edit_result(
         message,

@@ -39,6 +39,7 @@ from .time_picker import (
     picker_initial_now,
 )
 from .ui_common import format_step_with_tz, format_time_picker_text
+from .ui_tokens import is_cancel_text
 from .texts import (
     MSG_ACTIVITY_LEN,
     MSG_CALENDAR_STEP,
@@ -184,11 +185,11 @@ async def start_wizard(message: Message, state: FSMContext) -> None:
     await _start_calendar_step(message, state, user["timezone"])
 
 
-@router.message(WizardStates.waiting_calendar_date, F.text == "Отмена")
-@router.message(WizardStates.waiting_time_after_calendar, F.text == "Отмена")
-@router.message(WizardStates.waiting_activity, F.text == "Отмена")
-@router.message(WizardStates.confirm, F.text == "Отмена")
-@router.message(WizardStates.edit_choice, F.text == "Отмена")
+@router.message(WizardStates.waiting_calendar_date, F.text.func(is_cancel_text))
+@router.message(WizardStates.waiting_time_after_calendar, F.text.func(is_cancel_text))
+@router.message(WizardStates.waiting_activity, F.text.func(is_cancel_text))
+@router.message(WizardStates.confirm, F.text.func(is_cancel_text))
+@router.message(WizardStates.edit_choice, F.text.func(is_cancel_text))
 async def cancel_wizard(message: Message, state: FSMContext) -> None:
     await state.clear()
     await message.answer(MSG_CREATION_CANCELLED, reply_markup=MAIN_MENU)

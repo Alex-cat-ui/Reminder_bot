@@ -48,7 +48,7 @@ from .time_picker import (
     picker_initial_now,
 )
 from .ui_common import format_step_with_tz, format_time_picker_text
-from .ui_tokens import CANCEL_TEXT, STYLE_DANGER
+from .ui_tokens import CANCEL_TEXT, STYLE_DANGER, is_cancel_text
 from .texts import (
     MSG_BROWSER_CLOSED,
     MSG_BROWSER_CONTEXT_LOST,
@@ -718,9 +718,9 @@ async def _finalize_clone(state: FSMContext, user_id: int) -> tuple[bool, str | 
     return True, None
 
 
-@router.message(BrowserStates.clone_waiting_calendar_date, F.text == "Отмена")
-@router.message(BrowserStates.clone_waiting_time, F.text == "Отмена")
-@router.message(BrowserStates.clone_confirm, F.text == "Отмена")
+@router.message(BrowserStates.clone_waiting_calendar_date, F.text.func(is_cancel_text))
+@router.message(BrowserStates.clone_waiting_time, F.text.func(is_cancel_text))
+@router.message(BrowserStates.clone_confirm, F.text.func(is_cancel_text))
 async def cancel_clone_by_text(message: Message, state: FSMContext) -> None:
     restored = await return_to_browser_context(
         message,
