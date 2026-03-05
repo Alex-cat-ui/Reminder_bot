@@ -35,7 +35,7 @@ def test_month_shift_across_year_backward():
     assert month_shift(2026, 1, -1) == (2025, 12)
 
 
-def test_today_label_has_green_marker():
+def test_today_day_has_success_style():
     sid = "abcdef12"
     today = date(2026, 3, 4)
     max_date = date(2028, 3, 3)
@@ -47,8 +47,10 @@ def test_today_label_has_green_marker():
         max_date,
         today_date=today,
     )
-    texts = [b.text for b in _all_buttons(kb)]
-    assert "🟢4" in texts
+    day_buttons = [b for b in _all_buttons(kb) if b.callback_data == f"cal2:{sid}:day:20260304"]
+    assert day_buttons
+    assert day_buttons[0].text == "4"
+    assert day_buttons[0].style == "success"
 
 
 def test_selected_today_label_format():
@@ -64,8 +66,10 @@ def test_selected_today_label_format():
         selected_date=today,
         today_date=today,
     )
-    texts = [b.text for b in _all_buttons(kb)]
-    assert "[🟢4]" in texts
+    day_buttons = [b for b in _all_buttons(kb) if b.callback_data == f"cal2:{sid}:day:20260304"]
+    assert day_buttons
+    assert day_buttons[0].text == "[4]"
+    assert day_buttons[0].style == "success"
 
 
 def test_quick_dates_callbacks_present():
@@ -80,6 +84,17 @@ def test_quick_dates_callbacks_present():
         f"cal2:{sid}:quick:tomorrow",
         f"cal2:{sid}:quick:plus7",
     ]
+    assert [b.style for b in row2] == ["success", "primary", "primary"]
+
+
+def test_weekend_weekday_headers_are_danger():
+    sid = "abcdef12"
+    today = date(2026, 3, 4)
+    max_date = date(2028, 3, 3)
+    kb = build_date_calendar_kb(sid, 2026, 3, today, max_date, today_date=today)
+    weekday_row = kb.inline_keyboard[2]
+    assert [b.text for b in weekday_row] == ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+    assert [b.style for b in weekday_row] == [None, None, None, None, None, "danger", "danger"]
 
 
 def test_quick_times_callbacks_are_hhmm_only():
@@ -93,7 +108,12 @@ def test_quick_times_callbacks_are_hhmm_only():
         f"cal2:{sid}:time:1800",
         f"cal2:{sid}:time:2000",
     ]
+    assert kb.inline_keyboard[1][0].text == "Кастомное время"
+    assert kb.inline_keyboard[1][0].style == "primary"
     assert kb.inline_keyboard[1][0].callback_data == f"cal2:{sid}:time:picker"
+    assert kb.inline_keyboard[2][0].text == "Отмена"
+    assert kb.inline_keyboard[2][0].style == "danger"
+    assert kb.inline_keyboard[2][0].callback_data == f"cal2:{sid}:cancel"
 
 
 def test_invalid_session_rejected():

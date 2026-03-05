@@ -17,14 +17,28 @@ def test_time_past_error_is_actionable():
 
 def test_time_picker_contains_quick_presets_row():
     kb = build_time_picker_kb("abcdef12", 14, 35)
+    row1 = kb.inline_keyboard[0]
+    row2 = kb.inline_keyboard[1]
+    row3 = kb.inline_keyboard[2]
     preset_row = kb.inline_keyboard[3]
+    finish_row = kb.inline_keyboard[4]
+    cancel_row = kb.inline_keyboard[5]
+
+    assert [btn.style for btn in row1] == ["success", "success", "success"]
+    assert [btn.style for btn in row2] == ["success", "success", "success"]
+    assert [btn.style for btn in row3] == ["primary", "primary", "primary", "primary"]
     assert [btn.text for btn in preset_row] == ["09:00", "12:00", "18:00", "20:00"]
+    assert [btn.style for btn in preset_row] == ["primary", "primary", "primary", "primary"]
     assert [btn.callback_data for btn in preset_row] == [
         "tmr2:abcdef12:t:set:0900",
         "tmr2:abcdef12:t:set:1200",
         "tmr2:abcdef12:t:set:1800",
         "tmr2:abcdef12:t:set:2000",
     ]
+    assert finish_row[1].text == "Готово"
+    assert finish_row[1].style == "success"
+    assert cancel_row[0].text == "Отмена"
+    assert cancel_row[0].style == "danger"
 
 
 @pytest.mark.asyncio

@@ -17,9 +17,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
     Message,
-    ReplyKeyboardMarkup,
 )
 
 import db as database
@@ -36,18 +34,21 @@ from .duplicates import has_duplicate_event
 from .flow_common import (
     build_duplicate_warning_kb,
     calendar_bounds,
+    clamp_month_to_bounds,
     parse_duplicate_callback,
     quick_date,
+    state_iso_date,
 )
+from .input_hints import reply_pick_date_hint, reply_pick_time_hint
 from .metrics_utils import bump_metric
+from .picker_flow import apply_picker_delta_and_render, resolve_picker_context
 from .start import MAIN_MENU
 from .time_picker import (
-    apply_picker_action,
     build_time_picker_kb,
-    parse_time_picker_callback,
     picker_initial_now,
 )
 from .ui_common import format_step_with_tz, format_time_picker_text
+from .ui_tokens import CANCEL_TEXT, STYLE_DANGER
 from .texts import (
     MSG_BROWSER_CLOSED,
     MSG_BROWSER_CONTEXT_LOST,
@@ -63,7 +64,6 @@ from .texts import (
     MSG_PICK_DATE_WITH_BUTTONS,
     MSG_SET_TZ_FIRST,
     MSG_STALE_CALENDAR,
-    MSG_PICK_TIME_WITH_BUTTONS,
     MSG_CLONE_TIME_STEP,
     MSG_TIME_PAST,
     MSG_UNAUTHORIZED,
@@ -91,7 +91,6 @@ FILTER_RU = {
 }
 
 PAGE_SIZE = 5
-CANCEL_KB = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text="Отмена")]], resize_keyboard=True)
 
 
 # ---------- Browser list ----------
@@ -592,7 +591,13 @@ def _clone_confirm_kb(sid: str, source_event_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Создать копию", callback_data=f"cln2:{sid}:confirm:{source_event_id}")],
-            [InlineKeyboardButton(text="Отмена", callback_data=f"cln2:{sid}:cancel_confirm:{source_event_id}")],
+            [
+                InlineKeyboardButton(
+                    text=CANCEL_TEXT,
+                    callback_data=f"cln2:{sid}:cancel_confirm:{source_event_id}",
+                    style=STYLE_DANGER,
+                )
+            ],
         ]
     )
 
@@ -620,7 +625,6 @@ async def _start_clone_calendar_step(
     )
 
     step_text = format_step_with_tz(MSG_CLONE_CALENDAR_STEP, tz_name)
-    await message.answer(step_text, reply_markup=CANCEL_KB)
     kb = build_date_calendar_kb(
         sid,
         today.year,
@@ -791,15 +795,14 @@ async def on_clone_calendar(callback: CallbackQuery, state: FSMContext) -> None:
 
         shift = -1 if parsed["direction"] == "prev" else 1
         new_year, new_month = month_shift(parsed["year"], parsed["month"], shift)
-        min_month = (today.year, today.month)
-        max_month = (max_date.year, max_date.month)
-        if (new_year, new_month) < min_month:
-            new_year, new_month = min_month
-        if (new_year, new_month) > max_month:
-            new_year, new_month = max_month
+        new_year, new_month = clamp_month_to_bounds(
+            new_year,
+            new_month,
+            min_date=today,
+            max_date=max_date,
+        )
 
-        selected = data.get("clone_selected_date_iso")
-        selected_date = date.fromisoformat(selected) if selected else None
+        selected_date = state_iso_date(data, "clone_selected_date_iso")
         kb = build_date_calendar_kb(
             sid,
             new_year,
@@ -962,54 +965,40 @@ async def on_clone_time(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.message(BrowserStates.clone_waiting_time)
 async def clone_time_manual(message: Message, state: FSMContext) -> None:
-    await message.answer(MSG_PICK_TIME_WITH_BUTTONS)
+    await reply_pick_time_hint(message)
 
 
 @router.callback_query(BrowserStates.clone_waiting_time, F.data.startswith("tmr2:"))
 async def on_clone_time_picker(callback: CallbackQuery, state: FSMContext) -> None:
-    user_id = callback.from_user.id  # type: ignore[union-attr]
-    if is_debounced(user_id):
-        await bump_metric("callback_debounce_reject")
-        await callback.answer(MSG_DEBOUNCE)
+    ctx = await resolve_picker_context(
+        callback,
+        state,
+        debounce_check=is_debounced,
+        bump_metric=bump_metric,
+        sid_key="clone_tp_sid",
+        tz_key="clone_timezone",
+        hour_key="clone_tp_hour",
+        minute_key="clone_tp_minute",
+    )
+    if ctx is None:
         return
 
-    payload = parse_time_picker_callback(callback.data or "")
-    if payload is None:
-        await bump_metric("callback_invalid_payload")
-        await callback.answer(MSG_INVALID_ACTION)
-        return
-
-    kind, parsed = payload
-    data = await state.get_data()
-    expected_sid = data.get("clone_tp_sid")
-    tz_name = data.get("clone_timezone")
-    source_event_id = data.get("clone_source_event_id")
-    clone_sid = data.get("clone_sid")
-
-    if not expected_sid or not tz_name or not source_event_id or not clone_sid:
+    source_event_id = ctx.data.get("clone_source_event_id")
+    clone_sid = ctx.data.get("clone_sid")
+    if not source_event_id or not clone_sid:
         await bump_metric("callback_stale_session")
         await callback.answer(MSG_STALE_CALENDAR)
         return
 
-    if parsed.get("sid") != expected_sid:
-        await bump_metric("callback_stale_session")
-        await callback.answer(MSG_STALE_CALENDAR)
-        return
-
-    if callback.message is None:
-        await bump_metric("callback_invalid_payload")
-        await callback.answer(MSG_INVALID_ACTION)
-        return
-
-    if kind == "noop":
+    if ctx.kind == "noop":
         await callback.answer()
         return
 
-    if kind == "cancel":
+    if ctx.kind == "cancel":
         await state.update_data(clone_tp_sid=None, clone_tp_message_id=None)
         await callback.answer()
         await callback.message.answer(
-            format_step_with_tz(MSG_CLONE_TIME_STEP, tz_name),
+            format_step_with_tz(MSG_CLONE_TIME_STEP, ctx.tz_name),
             reply_markup=build_quick_time_kb(
                 clone_sid,
                 prefix="cln2",
@@ -1018,14 +1007,12 @@ async def on_clone_time_picker(callback: CallbackQuery, state: FSMContext) -> No
         )
         return
 
-    if kind == "ok":
-        hour = int(data.get("clone_tp_hour", 0))
-        minute = int(data.get("clone_tp_minute", 0))
+    if ctx.kind == "ok":
         ok, error = await _apply_clone_time(
             state,
             user_id=callback.from_user.id,  # type: ignore[union-attr]
-            hour=hour,
-            minute=minute,
+            hour=ctx.hour,
+            minute=ctx.minute,
         )
         if not ok:
             await callback.answer()
@@ -1051,24 +1038,19 @@ async def on_clone_time_picker(callback: CallbackQuery, state: FSMContext) -> No
         )
         return
 
-    hour = int(data.get("clone_tp_hour", 0))
-    minute = int(data.get("clone_tp_minute", 0))
-    hour, minute = apply_picker_action(
-        hour,
-        minute,
-        kind,
-        parsed.get("value"),
-        tz_name=tz_name,
+    await apply_picker_delta_and_render(
+        callback,
+        state,
+        ctx,
+        hour_key="clone_tp_hour",
+        minute_key="clone_tp_minute",
+        render_text=lambda tz_name, hour, minute: format_time_picker_text(
+            MSG_CLONE_TIME_STEP,
+            tz_name,
+            hour,
+            minute,
+        ),
     )
-    await state.update_data(clone_tp_hour=hour, clone_tp_minute=minute)
-    try:
-        await callback.message.edit_text(
-            format_time_picker_text(MSG_CLONE_TIME_STEP, tz_name, hour, minute),
-            reply_markup=build_time_picker_kb(expected_sid, hour, minute),
-        )
-    except TelegramBadRequest:
-        pass
-    await callback.answer()
 
 
 def _parse_clone_confirm_callback(data: str) -> tuple[str, str, int] | None:
@@ -1210,4 +1192,4 @@ async def on_clone_duplicate_decision(callback: CallbackQuery, state: FSMContext
 
 @router.message(BrowserStates.clone_waiting_calendar_date)
 async def clone_waiting_date_manual(message: Message) -> None:
-    await message.answer(MSG_PICK_DATE_WITH_BUTTONS)
+    await reply_pick_date_hint(message)

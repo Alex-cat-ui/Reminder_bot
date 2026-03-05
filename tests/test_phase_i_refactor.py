@@ -30,11 +30,11 @@ class _Callback:
 
 def test_ui_common_step_and_picker_format():
     step = format_step_with_tz("Создание | Шаг 1/3", "Europe/Moscow")
-    assert step == "Создание | Шаг 1/3\nЧасовой пояс: Europe/Moscow\n"
+    assert step == "Создание | Шаг 1/3\n"
 
     picker = format_time_picker_text("Создание | Шаг 2/3", "Europe/Moscow", 14, 35)
     assert "Создание | Шаг 2/3" in picker
-    assert "Часовой пояс: Europe/Moscow" in picker
+    assert "Часовой пояс" not in picker
     assert "Текущее значение: 14:35" in picker
 
 

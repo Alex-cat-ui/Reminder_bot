@@ -25,19 +25,22 @@ from .duplicates import has_duplicate_event
 from .flow_common import (
     build_duplicate_warning_kb,
     calendar_bounds,
+    clamp_month_to_bounds,
     parse_duplicate_callback,
     quick_date,
+    state_iso_date,
 )
+from .input_hints import reply_pick_date_hint, reply_pick_time_hint
 from .metrics_utils import bump_metric
+from .picker_flow import apply_picker_delta_and_render, resolve_picker_context
 from .start import MAIN_MENU
 from .task_browser import return_to_browser_context
 from .time_picker import (
-    apply_picker_action,
     build_time_picker_kb,
-    parse_time_picker_callback,
     picker_initial_now,
 )
 from .ui_common import format_step_with_tz, format_time_picker_text
+from .ui_tokens import CANCEL_TEXT, STYLE_DANGER
 from .texts import (
     MSG_ACTIVITY_LEN,
     MSG_CALENDAR_UPDATE_ERROR,
@@ -52,7 +55,6 @@ from .texts import (
     MSG_INVALID_ACTION,
     MSG_INVALID_DATE,
     MSG_PICK_DATE_WITH_BUTTONS,
-    MSG_PICK_TIME_WITH_BUTTONS,
     MSG_SET_TZ_FIRST,
     MSG_STALE_CALENDAR,
     MSG_TIME_PAST,
@@ -146,7 +148,7 @@ async def _show_field_menu(message: Message, state: FSMContext, event_id: int, t
         inline_keyboard=[
             [InlineKeyboardButton(text="Дата/время", callback_data=f"evt:field:dt:{event_id}")],
             [InlineKeyboardButton(text="Активность", callback_data=f"evt:field:activity:{event_id}")],
-            [InlineKeyboardButton(text="Отмена", callback_data=f"evt:cancel:{event_id}")],
+            [InlineKeyboardButton(text=CANCEL_TEXT, callback_data=f"evt:cancel:{event_id}", style=STYLE_DANGER)],
         ]
     )
     await message.answer(MSG_WEEK_EDIT_PROMPT, reply_markup=kb)
@@ -193,7 +195,6 @@ async def _start_edit_calendar_step(
     )
 
     step_text = format_step_with_tz(STEP_EDIT_DATE, tz_name)
-    await message.answer(step_text, reply_markup=CANCEL_KB)
 
     kb = build_date_calendar_kb(
         sid,
@@ -209,16 +210,6 @@ async def _start_edit_calendar_step(
 
     cal_msg = await message.answer(step_text, reply_markup=kb)
     await state.update_data(edit_cal_message_id=cal_msg.message_id)
-
-
-def _selected_edit_date_from_data(data: dict) -> date | None:
-    selected_iso = data.get("edit_selected_date_iso")
-    if not selected_iso:
-        return None
-    try:
-        return date.fromisoformat(selected_iso)
-    except ValueError:
-        return None
 
 
 async def _apply_edit_datetime(
@@ -467,13 +458,12 @@ async def on_edit_calendar_date(callback: CallbackQuery, state: FSMContext) -> N
 
         shift = -1 if parsed["direction"] == "prev" else 1
         new_year, new_month = month_shift(parsed["year"], parsed["month"], shift)
-
-        min_month = (today.year, today.month)
-        max_month = (max_date.year, max_date.month)
-        if (new_year, new_month) < min_month:
-            new_year, new_month = min_month
-        if (new_year, new_month) > max_month:
-            new_year, new_month = max_month
+        new_year, new_month = clamp_month_to_bounds(
+            new_year,
+            new_month,
+            min_date=today,
+            max_date=max_date,
+        )
 
         kb = build_date_calendar_kb(
             expected_sid,
@@ -481,7 +471,7 @@ async def on_edit_calendar_date(callback: CallbackQuery, state: FSMContext) -> N
             new_month,
             today,
             max_date,
-            selected_date=_selected_edit_date_from_data(data),
+            selected_date=state_iso_date(data, "edit_selected_date_iso"),
             today_date=today,
             prefix="edtcal2",
             tail_parts=(str(expected_event_id),),
@@ -660,53 +650,34 @@ async def on_edit_time_callback(callback: CallbackQuery, state: FSMContext) -> N
 
 @router.callback_query(EditEventStates.edit_waiting_time, F.data.startswith("tmr2:"))
 async def on_edit_time_picker(callback: CallbackQuery, state: FSMContext) -> None:
-    user_id = callback.from_user.id  # type: ignore[union-attr]
-    if is_debounced(user_id):
-        await bump_metric("callback_debounce_reject")
-        await callback.answer(MSG_DEBOUNCE)
+    ctx = await resolve_picker_context(
+        callback,
+        state,
+        debounce_check=is_debounced,
+        bump_metric=bump_metric,
+        sid_key="edit_tp_sid",
+        tz_key="edit_timezone",
+        hour_key="edit_tp_hour",
+        minute_key="edit_tp_minute",
+    )
+    if ctx is None:
         return
 
-    payload = parse_time_picker_callback(callback.data or "")
-    if payload is None:
-        await bump_metric("callback_invalid_payload")
-        await callback.answer(MSG_INVALID_ACTION)
-        return
-
-    kind, parsed = payload
-    data = await state.get_data()
-    expected_sid = data.get("edit_tp_sid")
-    tz_name = data.get("edit_timezone")
-
-    if not expected_sid or not tz_name:
-        await bump_metric("callback_stale_session")
-        await callback.answer(MSG_STALE_CALENDAR)
-        return
-
-    if parsed.get("sid") != expected_sid:
-        await bump_metric("callback_stale_session")
-        await callback.answer(MSG_STALE_CALENDAR)
-        return
-
-    if callback.message is None:
-        await bump_metric("callback_invalid_payload")
-        await callback.answer(MSG_INVALID_ACTION)
-        return
-
-    if kind == "noop":
+    if ctx.kind == "noop":
         await callback.answer()
         return
 
-    if kind == "cancel":
+    if ctx.kind == "cancel":
         await state.update_data(edit_tp_sid=None, edit_tp_message_id=None)
         await callback.answer()
-        cal_sid = data.get("edit_cal_session_id")
-        event_id = data.get("edit_event_id")
+        cal_sid = ctx.data.get("edit_cal_session_id")
+        event_id = ctx.data.get("edit_event_id")
         if not cal_sid or not event_id:
             await bump_metric("callback_stale_session")
             await callback.message.answer(MSG_STALE_CALENDAR)
             return
         await callback.message.answer(
-            format_step_with_tz(STEP_EDIT_TIME, tz_name),
+            format_step_with_tz(STEP_EDIT_TIME, ctx.tz_name),
             reply_markup=build_quick_time_kb(
                 cal_sid,
                 prefix="edtcal2",
@@ -715,14 +686,12 @@ async def on_edit_time_picker(callback: CallbackQuery, state: FSMContext) -> Non
         )
         return
 
-    if kind == "ok":
-        hour = int(data.get("edit_tp_hour", 0))
-        minute = int(data.get("edit_tp_minute", 0))
+    if ctx.kind == "ok":
         ok, error = await _apply_edit_datetime(
             state,
             callback.from_user.id,  # type: ignore[union-attr]
-            hour,
-            minute,
+            ctx.hour,
+            ctx.minute,
         )
         if not ok:
             if error == "DUPLICATE":
@@ -743,6 +712,7 @@ async def on_edit_time_picker(callback: CallbackQuery, state: FSMContext) -> Non
             await callback.message.edit_reply_markup(reply_markup=None)
         except TelegramBadRequest:
             pass
+        data = await state.get_data()
         event_id = data.get("edit_event_id")
         summary = None
         if event_id:
@@ -763,34 +733,24 @@ async def on_edit_time_picker(callback: CallbackQuery, state: FSMContext) -> Non
         )
         return
 
-    hour = int(data.get("edit_tp_hour", 0))
-    minute = int(data.get("edit_tp_minute", 0))
-    hour, minute = apply_picker_action(
-        hour,
-        minute,
-        kind,
-        parsed.get("value"),
-        tz_name=tz_name,
+    await apply_picker_delta_and_render(
+        callback,
+        state,
+        ctx,
+        hour_key="edit_tp_hour",
+        minute_key="edit_tp_minute",
+        render_text=_time_picker_text,
     )
-    await state.update_data(edit_tp_hour=hour, edit_tp_minute=minute)
-    try:
-        await callback.message.edit_text(
-            _time_picker_text(tz_name, hour, minute),
-            reply_markup=build_time_picker_kb(expected_sid, hour, minute),
-        )
-    except TelegramBadRequest:
-        pass
-    await callback.answer()
 
 
 @router.message(EditEventStates.edit_waiting_calendar_date)
 async def waiting_edit_calendar_date_text_fallback(message: Message) -> None:
-    await message.answer(MSG_PICK_DATE_WITH_BUTTONS)
+    await reply_pick_date_hint(message)
 
 
 @router.message(EditEventStates.edit_waiting_time)
 async def process_edit_time_manual(message: Message, state: FSMContext) -> None:
-    await message.answer(MSG_PICK_TIME_WITH_BUTTONS)
+    await reply_pick_time_hint(message)
 
 
 @router.callback_query(EditEventStates.edit_confirm_duplicate, F.data.startswith("dup2:"))

@@ -226,3 +226,27 @@ async def test_date_time_text_fallbacks_return_button_guidance():
     msg6 = _FakeMessage()
     await browser.clone_time_manual(msg6, state)
     assert msg6.answers[-1][0] == MSG_PICK_TIME_WITH_BUTTONS
+
+
+@pytest.mark.asyncio
+async def test_calendar_step_header_not_duplicated_in_create_edit_clone():
+    create_state = _FakeState()
+    create_msg = _FakeMessage()
+    await wizard._start_calendar_step(create_msg, create_state, "Europe/Moscow")
+    assert len(create_msg.answers) == 1
+
+    edit_state = _FakeState()
+    edit_msg = _FakeMessage()
+    await event_edit._start_edit_calendar_step(edit_msg, edit_state, event_id=10, tz_name="Europe/Moscow")
+    assert len(edit_msg.answers) == 1
+
+    clone_state = _FakeState()
+    clone_msg = _FakeMessage()
+    await browser._start_clone_calendar_step(
+        clone_msg,
+        clone_state,
+        user_id=111,
+        source_event={"id": 20, "activity": "Run"},
+        tz_name="Europe/Moscow",
+    )
+    assert len(clone_msg.answers) == 1

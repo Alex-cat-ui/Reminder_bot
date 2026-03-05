@@ -25,15 +25,17 @@ from .duplicates import has_duplicate_event
 from .flow_common import (
     build_duplicate_warning_kb,
     calendar_bounds,
+    clamp_month_to_bounds,
     parse_duplicate_callback,
     quick_date,
+    state_iso_date,
 )
+from .input_hints import reply_pick_date_hint, reply_pick_time_hint
 from .metrics_utils import bump_metric
+from .picker_flow import apply_picker_delta_and_render, resolve_picker_context
 from .start import MAIN_MENU
 from .time_picker import (
-    apply_picker_action,
     build_time_picker_kb,
-    parse_time_picker_callback,
     picker_initial_now,
 )
 from .ui_common import format_step_with_tz, format_time_picker_text
@@ -52,7 +54,6 @@ from .texts import (
     MSG_INVALID_ACTION,
     MSG_INVALID_DATE,
     MSG_PICK_DATE_WITH_BUTTONS,
-    MSG_PICK_TIME_WITH_BUTTONS,
     MSG_SET_TZ_FIRST,
     MSG_STALE_CALENDAR,
     MSG_TIME_PAST,
@@ -80,16 +81,6 @@ CANCEL_KB = ReplyKeyboardMarkup(
 
 STEP_DATE = MSG_CALENDAR_STEP
 STEP_TIME = MSG_TIME_STEP
-
-
-def _selected_date_from_data(data: dict) -> date | None:
-    selected_iso = data.get("selected_date_iso")
-    if not selected_iso:
-        return None
-    try:
-        return date.fromisoformat(selected_iso)
-    except ValueError:
-        return None
 
 
 def _time_picker_text(tz_name: str, hour: int, minute: int) -> str:
@@ -130,7 +121,6 @@ async def _start_calendar_step(message: Message, state: FSMContext, tz_name: str
     )
 
     step_text = format_step_with_tz(STEP_DATE, tz_name)
-    await message.answer(step_text, reply_markup=CANCEL_KB)
     kb = build_date_calendar_kb(
         sid,
         today.year,
@@ -258,13 +248,12 @@ async def on_calendar_date(callback: CallbackQuery, state: FSMContext) -> None:
 
         shift = -1 if parsed["direction"] == "prev" else 1
         new_year, new_month = month_shift(parsed["year"], parsed["month"], shift)
-
-        min_month = (today.year, today.month)
-        max_month = (max_date.year, max_date.month)
-        if (new_year, new_month) < min_month:
-            new_year, new_month = min_month
-        if (new_year, new_month) > max_month:
-            new_year, new_month = max_month
+        new_year, new_month = clamp_month_to_bounds(
+            new_year,
+            new_month,
+            min_date=today,
+            max_date=max_date,
+        )
 
         kb = build_date_calendar_kb(
             expected_sid,
@@ -272,7 +261,7 @@ async def on_calendar_date(callback: CallbackQuery, state: FSMContext) -> None:
             new_month,
             today,
             max_date,
-            selected_date=_selected_date_from_data(data),
+            selected_date=state_iso_date(data, "selected_date_iso"),
             today_date=today,
             prefix="cal2",
         )
@@ -411,60 +400,39 @@ async def on_quick_time(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(WizardStates.waiting_time_after_calendar, F.data.startswith("tmr2:"))
 async def on_create_time_picker(callback: CallbackQuery, state: FSMContext) -> None:
-    user_id = callback.from_user.id  # type: ignore[union-attr]
-    if is_debounced(user_id):
-        await bump_metric("callback_debounce_reject")
-        await callback.answer(MSG_DEBOUNCE)
+    ctx = await resolve_picker_context(
+        callback,
+        state,
+        debounce_check=is_debounced,
+        bump_metric=bump_metric,
+        sid_key="tp_sid",
+        tz_key="timezone",
+        hour_key="tp_hour",
+        minute_key="tp_minute",
+    )
+    if ctx is None:
         return
 
-    payload = parse_time_picker_callback(callback.data or "")
-    if payload is None:
-        await bump_metric("callback_invalid_payload")
-        await callback.answer(MSG_INVALID_ACTION)
-        return
-
-    kind, parsed = payload
-    data = await state.get_data()
-    expected_sid = data.get("tp_sid")
-    tz_name = data.get("timezone")
-
-    if not expected_sid or not tz_name:
-        await bump_metric("callback_stale_session")
-        await callback.answer(MSG_STALE_CALENDAR)
-        return
-
-    if parsed.get("sid") != expected_sid:
-        await bump_metric("callback_stale_session")
-        await callback.answer(MSG_STALE_CALENDAR)
-        return
-
-    if callback.message is None:
-        await bump_metric("callback_invalid_payload")
-        await callback.answer(MSG_INVALID_ACTION)
-        return
-
-    if kind == "noop":
+    if ctx.kind == "noop":
         await callback.answer()
         return
 
-    if kind == "cancel":
+    if ctx.kind == "cancel":
         await state.update_data(tp_sid=None, tp_message_id=None)
         await callback.answer()
-        cal_sid = data.get("cal_session_id")
+        cal_sid = ctx.data.get("cal_session_id")
         if not cal_sid:
             await bump_metric("callback_stale_session")
             await callback.message.answer(MSG_STALE_CALENDAR)
             return
         await callback.message.answer(
-            format_step_with_tz(STEP_TIME, tz_name),
+            format_step_with_tz(STEP_TIME, ctx.tz_name),
             reply_markup=build_quick_time_kb(cal_sid, prefix="cal2"),
         )
         return
 
-    if kind == "ok":
-        hour = int(data.get("tp_hour", 0))
-        minute = int(data.get("tp_minute", 0))
-        ok, error = await _apply_selected_time(state, tz_name, hour, minute)
+    if ctx.kind == "ok":
+        ok, error = await _apply_selected_time(state, ctx.tz_name, ctx.hour, ctx.minute)
         if not ok:
             await callback.answer()
             await callback.message.answer(error or MSG_INVALID_ACTION)
@@ -477,35 +445,24 @@ async def on_create_time_picker(callback: CallbackQuery, state: FSMContext) -> N
         await callback.message.answer(MSG_ENTER_ACTIVITY)
         return
 
-    hour = int(data.get("tp_hour", 0))
-    minute = int(data.get("tp_minute", 0))
-    hour, minute = apply_picker_action(
-        hour,
-        minute,
-        kind,
-        parsed.get("value"),
-        tz_name=tz_name,
+    await apply_picker_delta_and_render(
+        callback,
+        state,
+        ctx,
+        hour_key="tp_hour",
+        minute_key="tp_minute",
+        render_text=_time_picker_text,
     )
-
-    await state.update_data(tp_hour=hour, tp_minute=minute)
-    try:
-        await callback.message.edit_text(
-            _time_picker_text(tz_name, hour, minute),
-            reply_markup=build_time_picker_kb(expected_sid, hour, minute),
-        )
-    except TelegramBadRequest:
-        pass
-    await callback.answer()
 
 
 @router.message(WizardStates.waiting_calendar_date)
 async def waiting_calendar_date_text_fallback(message: Message) -> None:
-    await message.answer(MSG_PICK_DATE_WITH_BUTTONS)
+    await reply_pick_date_hint(message)
 
 
 @router.message(WizardStates.waiting_time_after_calendar)
 async def process_time_after_calendar(message: Message, state: FSMContext) -> None:
-    await message.answer(MSG_PICK_TIME_WITH_BUTTONS)
+    await reply_pick_time_hint(message)
 
 
 @router.message(WizardStates.waiting_activity)

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from .ui_tokens import CANCEL_TEXT, DONE_TEXT, STYLE_DANGER, STYLE_PRIMARY, STYLE_SUCCESS
 
 _SID_RE = re.compile(r"^[0-9a-f]{8}$")
 
@@ -59,32 +60,32 @@ def build_time_picker_kb(sid: str, hour: int, minute: int) -> InlineKeyboardMark
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="-1ч", callback_data=f"tmr2:{sid}:h:minus1"),
-                InlineKeyboardButton(text=hh, callback_data=f"tmr2:{sid}:noop"),
-                InlineKeyboardButton(text="+1ч", callback_data=f"tmr2:{sid}:h:plus1"),
+                InlineKeyboardButton(text="-1ч", callback_data=f"tmr2:{sid}:h:minus1", style=STYLE_SUCCESS),
+                InlineKeyboardButton(text=hh, callback_data=f"tmr2:{sid}:noop", style=STYLE_SUCCESS),
+                InlineKeyboardButton(text="+1ч", callback_data=f"tmr2:{sid}:h:plus1", style=STYLE_SUCCESS),
             ],
             [
-                InlineKeyboardButton(text="-5м", callback_data=f"tmr2:{sid}:m:minus5"),
-                InlineKeyboardButton(text=mm, callback_data=f"tmr2:{sid}:noop"),
-                InlineKeyboardButton(text="+5м", callback_data=f"tmr2:{sid}:m:plus5"),
+                InlineKeyboardButton(text="-5м", callback_data=f"tmr2:{sid}:m:minus5", style=STYLE_SUCCESS),
+                InlineKeyboardButton(text=mm, callback_data=f"tmr2:{sid}:noop", style=STYLE_SUCCESS),
+                InlineKeyboardButton(text="+5м", callback_data=f"tmr2:{sid}:m:plus5", style=STYLE_SUCCESS),
             ],
             [
-                InlineKeyboardButton(text="00", callback_data=f"tmr2:{sid}:m:set:00"),
-                InlineKeyboardButton(text="15", callback_data=f"tmr2:{sid}:m:set:15"),
-                InlineKeyboardButton(text="30", callback_data=f"tmr2:{sid}:m:set:30"),
-                InlineKeyboardButton(text="45", callback_data=f"tmr2:{sid}:m:set:45"),
+                InlineKeyboardButton(text="00", callback_data=f"tmr2:{sid}:m:set:00", style=STYLE_PRIMARY),
+                InlineKeyboardButton(text="15", callback_data=f"tmr2:{sid}:m:set:15", style=STYLE_PRIMARY),
+                InlineKeyboardButton(text="30", callback_data=f"tmr2:{sid}:m:set:30", style=STYLE_PRIMARY),
+                InlineKeyboardButton(text="45", callback_data=f"tmr2:{sid}:m:set:45", style=STYLE_PRIMARY),
             ],
             [
-                InlineKeyboardButton(text="09:00", callback_data=f"tmr2:{sid}:t:set:0900"),
-                InlineKeyboardButton(text="12:00", callback_data=f"tmr2:{sid}:t:set:1200"),
-                InlineKeyboardButton(text="18:00", callback_data=f"tmr2:{sid}:t:set:1800"),
-                InlineKeyboardButton(text="20:00", callback_data=f"tmr2:{sid}:t:set:2000"),
+                InlineKeyboardButton(text="09:00", callback_data=f"tmr2:{sid}:t:set:0900", style=STYLE_PRIMARY),
+                InlineKeyboardButton(text="12:00", callback_data=f"tmr2:{sid}:t:set:1200", style=STYLE_PRIMARY),
+                InlineKeyboardButton(text="18:00", callback_data=f"tmr2:{sid}:t:set:1800", style=STYLE_PRIMARY),
+                InlineKeyboardButton(text="20:00", callback_data=f"tmr2:{sid}:t:set:2000", style=STYLE_PRIMARY),
             ],
             [
                 InlineKeyboardButton(text="Сейчас+1ч", callback_data=f"tmr2:{sid}:quick:now_plus_1h"),
-                InlineKeyboardButton(text="Готово", callback_data=f"tmr2:{sid}:ok"),
+                InlineKeyboardButton(text=DONE_TEXT, callback_data=f"tmr2:{sid}:ok", style=STYLE_SUCCESS),
             ],
-            [InlineKeyboardButton(text="Отмена", callback_data=f"tmr2:{sid}:cancel")],
+            [InlineKeyboardButton(text=CANCEL_TEXT, callback_data=f"tmr2:{sid}:cancel", style=STYLE_DANGER)],
         ]
     )
 

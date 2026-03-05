@@ -9,6 +9,7 @@ import uuid
 from datetime import date
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from .ui_tokens import CANCEL_TEXT, STYLE_DANGER, STYLE_PRIMARY, STYLE_SUCCESS
 
 MONTH_NAMES_RU = [
     "Январь",
@@ -122,22 +123,29 @@ def build_date_calendar_kb(
             InlineKeyboardButton(
                 text="Сегодня",
                 callback_data=_cb(prefix, sid, "quick", "today", tail_parts=tail_parts),
+                style=STYLE_SUCCESS,
             ),
             InlineKeyboardButton(
                 text="Завтра",
                 callback_data=_cb(prefix, sid, "quick", "tomorrow", tail_parts=tail_parts),
+                style=STYLE_PRIMARY,
             ),
             InlineKeyboardButton(
                 text="+7 дней",
                 callback_data=_cb(prefix, sid, "quick", "plus7", tail_parts=tail_parts),
+                style=STYLE_PRIMARY,
             ),
         ]
     )
 
     kb.append(
         [
-            InlineKeyboardButton(text=wd, callback_data=_cb(prefix, sid, "noop", tail_parts=tail_parts))
-            for wd in WEEKDAY_SHORT_RU
+            InlineKeyboardButton(
+                text=wd,
+                callback_data=_cb(prefix, sid, "noop", tail_parts=tail_parts),
+                style=(STYLE_DANGER if idx >= 5 else None),
+            )
+            for idx, wd in enumerate(WEEKDAY_SHORT_RU)
         ]
     )
 
@@ -148,7 +156,7 @@ def build_date_calendar_kb(
 
     for week in weeks[:6]:
         row: list[InlineKeyboardButton] = []
-        for day_num in week:
+        for weekday_idx, day_num in enumerate(week):
             if day_num == 0:
                 row.append(
                     InlineKeyboardButton(
@@ -159,9 +167,9 @@ def build_date_calendar_kb(
 
             cell_date = date(view_year, view_month, day_num)
             label = f"{day_num}"
-
+            style = STYLE_DANGER if weekday_idx >= 5 else None
             if cell_date == today:
-                label = f"🟢{day_num}"
+                style = STYLE_SUCCESS
 
             if selected_date is not None and cell_date == selected_date:
                 label = f"[{label}]"
@@ -177,15 +185,16 @@ def build_date_calendar_kb(
                     tail_parts=tail_parts,
                 )
 
-            row.append(InlineKeyboardButton(text=label, callback_data=cb_data))
+            row.append(InlineKeyboardButton(text=label, callback_data=cb_data, style=style))
 
         kb.append(row)
 
     kb.append(
         [
             InlineKeyboardButton(
-                text="Отмена",
+                text=CANCEL_TEXT,
                 callback_data=_cb(prefix, sid, "cancel", tail_parts=tail_parts),
+                style=STYLE_DANGER,
             )
         ]
     )
@@ -221,8 +230,16 @@ def build_quick_time_kb(
             ],
             [
                 InlineKeyboardButton(
-                    text="Открыть роллер",
+                    text="Кастомное время",
                     callback_data=_cb(prefix, sid, "time", "picker", tail_parts=tail_parts),
+                    style=STYLE_PRIMARY,
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text=CANCEL_TEXT,
+                    callback_data=_cb(prefix, sid, "cancel", tail_parts=tail_parts),
+                    style=STYLE_DANGER,
                 )
             ],
         ]
